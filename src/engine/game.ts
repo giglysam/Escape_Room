@@ -19,9 +19,15 @@ export interface GameCallbacks {
 export interface GameState {
   inventory: Set<string>;
   flags: Set<string>;
-  /** Object ids whose riddle has been solved this run */
-  solvedRiddles: Set<string>;
   currentRoomIndex: number;
+  /** Switch on/off state, keyed by switch object id. */
+  switchStates: Map<string, boolean>;
+  /** Per-room sequence progress (which symbol-index they are pressing next). */
+  sequenceProgress: Map<string, number>;
+  /** Items currently placed on a given pedestal: pedestalId -> Set<itemId>. */
+  pedestalSlots: Map<string, Set<string>>;
+  /** Items the player has used / consumed (e.g. dropped onto a pedestal) — hidden from world. */
+  consumedItems: Set<string>;
 }
 
 interface PlacedObject {
@@ -80,8 +86,11 @@ export class GameEngine {
     this.state = {
       inventory: new Set(),
       flags: new Set(),
-      solvedRiddles: new Set(),
       currentRoomIndex: 0,
+      switchStates: new Map(),
+      sequenceProgress: new Map(),
+      pedestalSlots: new Map(),
+      consumedItems: new Set(),
     };
     this.player = {
       x: 80,
@@ -133,11 +142,82 @@ export class GameEngine {
     return this.state.flags.has(id);
   }
 
-  /** Mark riddle on a note solved → unlocks the related container in the same room. */
-  solveRiddle(noteObjectId: string) {
-    this.state.solvedRiddles.add(noteObjectId);
+  /** Mark this room's door as unlocked (used after a puzzle is fully solved). */
+  unlockDoor() {
+    this.setFlag(`door_${this.currentRoom.id}_unlocked`);
+  }
+
+  /** Toggle a switch by id and return new state. */
+  toggleSwitch(switchId: string): boolean {
+    const cur = this.state.switchStates.get(switchId) ?? false;
+    const next = !cur;
+    this.state.switchStates.set(switchId, next);
+    this.checkSwitchPuzzle();
+    return next;
+  }
+
+  isSwitchOn(switchId: string): boolean {
+    return this.state.switchStates.get(switchId) ?? false;
+  }
+
+  /** Push a sequence button. Returns 'correct' | 'wrong' | 'complete'. */
+  pressSequenceButton(buttonObj: RoomObject): "correct" | "wrong" | "complete" {
     const roomId = this.currentRoom.id;
-    this.setFlag(`riddle_${roomId}_solved`);
+    const expectedIdx = this.state.sequenceProgress.get(roomId) ?? 0;
+    if (buttonObj.symbolIndex === expectedIdx) {
+      const next = expectedIdx + 1;
+      const total = this.currentRoom.objects.filter((o) => o.kind === "sequence_button").length;
+      if (next >= total) {
+        this.state.sequenceProgress.set(roomId, next);
+        this.unlockDoor();
+        return "complete";
+      }
+      this.state.sequenceProgress.set(roomId, next);
+      return "correct";
+    }
+    this.state.sequenceProgress.set(roomId, 0);
+    return "wrong";
+  }
+
+  getSequenceProgress(): number {
+    return this.state.sequenceProgress.get(this.currentRoom.id) ?? 0;
+  }
+
+  /** Place an item from inventory onto a pedestal. Returns true if accepted. */
+  depositOnPedestal(pedestal: RoomObject, itemId: string): "accepted" | "rejected" | "complete" {
+    if (!pedestal.acceptsItems?.includes(itemId)) return "rejected";
+    if (!this.hasItem(itemId)) return "rejected";
+    const slot = this.state.pedestalSlots.get(pedestal.id) ?? new Set();
+    if (slot.has(itemId)) return "rejected";
+    slot.add(itemId);
+    this.state.pedestalSlots.set(pedestal.id, slot);
+    this.state.inventory.delete(itemId);
+    this.state.consumedItems.add(itemId);
+    if (slot.size >= pedestal.acceptsItems.length) {
+      this.unlockDoor();
+      return "complete";
+    }
+    return "accepted";
+  }
+
+  getPedestalSlots(pedestalId: string): Set<string> {
+    return this.state.pedestalSlots.get(pedestalId) ?? new Set();
+  }
+
+  /** Has the player won the current room's puzzle? */
+  isDoorUnlocked(): boolean {
+    return this.hasFlag(`door_${this.currentRoom.id}_unlocked`);
+  }
+
+  /** Check whether the switch combination matches the target pattern. */
+  private checkSwitchPuzzle() {
+    const switches = this.currentRoom.objects.filter((o) => o.kind === "switch");
+    if (switches.length === 0) return;
+    const allCorrect = switches.every((sw) => {
+      const cur = this.state.switchStates.get(sw.id) ?? false;
+      return cur === !!sw.targetOn;
+    });
+    if (allCorrect) this.unlockDoor();
   }
 
   /** Move to next room, or trigger win if at exit. */
@@ -158,7 +238,18 @@ export class GameEngine {
     this.currentRoom = this.plan.rooms[idx]!;
     this.placed = [];
 
+    // Seed switch initial states for this room (only once)
     for (const obj of this.currentRoom.objects) {
+      if (obj.kind === "switch" && !this.state.switchStates.has(obj.id)) {
+        this.state.switchStates.set(obj.id, !!obj.initialOn);
+      }
+    }
+    // Reset sequence progress for the room when entering
+    this.state.sequenceProgress.set(this.currentRoom.id, 0);
+
+    for (const obj of this.currentRoom.objects) {
+      // Hide already-consumed items (placed on a pedestal)
+      if (obj.kind === "item" && this.state.consumedItems.has(obj.id)) continue;
       const asset = this.assets.objects.get(`${this.currentRoom.id}:${obj.id}`);
       if (!asset) continue;
 
@@ -433,6 +524,7 @@ export class GameEngine {
         ctx.fill();
       }
       ctx.drawImage(p.asset.source, p.drawRect.x, p.drawRect.y, p.drawRect.w, p.drawRect.h);
+      this.drawObjectOverlay(p);
 
       // hover highlight
       if (this.hoveredObject === p && p.obj.interactable) {
@@ -471,6 +563,97 @@ export class GameEngine {
     ctx.fillRect(0, 0, W, H);
   }
 
+  /**
+   * Per-object on-canvas overlays — symbols on buttons, ON/OFF chip on switches,
+   * progress bar on pedestals, "open" outline on door once unlocked, etc.
+   */
+  private drawObjectOverlay(p: PlacedObject) {
+    const ctx = this.ctx;
+    const { obj, drawRect: r } = p;
+
+    if (obj.kind === "sequence_button" && obj.symbol) {
+      ctx.save();
+      const cx = r.x + r.w / 2;
+      const cy = r.y + r.h / 2;
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.beginPath();
+      ctx.arc(cx, cy, Math.min(r.w, r.h) * 0.32, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#16e1c5";
+      ctx.font = `bold ${Math.round(Math.min(r.w, r.h) * 0.5)}px serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(obj.symbol, cx, cy + 1);
+      ctx.restore();
+    } else if (obj.kind === "switch") {
+      const on = this.state.switchStates.get(obj.id) ?? !!obj.initialOn;
+      ctx.save();
+      // ON/OFF chip on top
+      const chipW = Math.max(34, r.w * 0.7);
+      const chipH = 16;
+      const chipX = r.x + (r.w - chipW) / 2;
+      const chipY = r.y - chipH - 2;
+      ctx.fillStyle = on ? "rgba(74, 222, 128, 0.95)" : "rgba(255, 93, 108, 0.95)";
+      this.roundRect(chipX, chipY, chipW, chipH, 4);
+      ctx.fill();
+      ctx.fillStyle = "#0a0a14";
+      ctx.font = "bold 11px Inter, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(on ? "ON" : "OFF", chipX + chipW / 2, chipY + chipH / 2 + 1);
+      // small label inside the switch with its number
+      if (obj.symbol) {
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        const cx = r.x + r.w / 2;
+        const cy = r.y + r.h * 0.7;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 14px Inter, system-ui, sans-serif";
+        ctx.fillText(obj.symbol, cx, cy + 1);
+      }
+      ctx.restore();
+    } else if (obj.kind === "pedestal" && obj.acceptsItems) {
+      const slot = this.state.pedestalSlots.get(obj.id) ?? new Set<string>();
+      ctx.save();
+      const total = obj.acceptsItems.length;
+      const w = Math.max(80, r.w * 0.7);
+      const x = r.x + (r.w - w) / 2;
+      const y = r.y - 22;
+      ctx.fillStyle = "rgba(7,7,13,0.9)";
+      this.roundRect(x, y, w, 18, 4);
+      ctx.fill();
+      ctx.fillStyle = "#16e1c5";
+      ctx.font = "bold 11px Inter, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`${slot.size} / ${total}`, x + w / 2, y + 9);
+      ctx.restore();
+    } else if (obj.kind === "item") {
+      ctx.save();
+      const cx = r.x + r.w / 2;
+      const cy = r.y + r.h / 2;
+      const t = (performance.now() / 600) % (Math.PI * 2);
+      const radius = Math.min(r.w, r.h) * 0.7 + Math.sin(t) * 4;
+      const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+      grd.addColorStop(0, "rgba(22, 225, 197, 0.45)");
+      grd.addColorStop(1, "rgba(22, 225, 197, 0)");
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else if ((obj.kind === "door" || obj.kind === "exit") && this.isDoorUnlocked()) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(74, 222, 128, 0.95)";
+      ctx.lineWidth = 3;
+      ctx.setLineDash([10, 6]);
+      ctx.strokeRect(r.x - 3, r.y - 3, r.w + 6, r.h + 6);
+      ctx.restore();
+    }
+  }
+
   private roundRect(x: number, y: number, w: number, h: number, r: number) {
     const ctx = this.ctx;
     ctx.beginPath();
@@ -489,18 +672,18 @@ function labelFor(obj: RoomObject): string {
       return "Open door";
     case "exit":
       return "Open exit";
-    case "keypad":
-      return "Use keypad";
-    case "note":
-      return "Read note";
-    case "container":
-      return "Open container";
-    case "key":
-      return "Take key";
+    case "item":
+      return "Pick up";
+    case "pedestal":
+      return "Place item";
+    case "sequence_clue":
+      return "Read mural";
+    case "sequence_button":
+      return `Press ${obj.symbol ?? ""}`.trim();
     case "switch":
-      return "Toggle switch";
-    case "tool":
-      return "Take tool";
+      return "Toggle";
+    case "switch_clue":
+      return "Inspect clue";
     default:
       return "Inspect";
   }

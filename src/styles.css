@@ -343,6 +343,32 @@ textarea:focus {
   min-height: 16px;
   text-align: center;
 }
+.symbol-row {
+  display: flex;
+  gap: 10px;
+  margin: 14px 0;
+  justify-content: space-between;
+}
+.symbol-cell {
+  flex: 1;
+  background: #06060c;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 0 8px;
+  text-align: center;
+}
+.symbol-glyph {
+  font-size: 36px;
+  line-height: 1;
+  color: var(--accent-2);
+  font-family: serif;
+}
+.symbol-index {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
 
 .toast {
   position: absolute;
