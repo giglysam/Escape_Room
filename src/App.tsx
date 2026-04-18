@@ -250,6 +250,28 @@ export default function App() {
               setPhase("menu");
               setPlan(null);
               setAssets(null);
+              setModal(null);
+              setToast(null);
+            }}
+            onInventoryClick={(itemId) => {
+              const desc = describeItem(itemId, plan);
+              setModal({
+                kind: "info",
+                object: {
+                  id: `inv_${itemId}`,
+                  name: itemId,
+                  prompt: "",
+                  x: 0,
+                  y: 0,
+                  width: 0,
+                  height: 0,
+                  collidable: false,
+                  interactable: false,
+                  removeBackground: false,
+                  kind: "decoration",
+                },
+                message: desc,
+              });
             }}
           />
           {modal && (
@@ -428,47 +450,82 @@ function Hud({
   inventory,
   invRev,
   onQuit,
+  onInventoryClick,
 }: {
   plan: GamePlan;
   currentRoomId: string;
   inventory: string[];
   invRev: number;
   onQuit: () => void;
+  onInventoryClick: (itemId: string) => void;
 }) {
   const room = plan.rooms.find((r) => r.id === currentRoomId);
   // touch invRev so React rerenders when inventory mutates in-place
   void invRev;
   return (
     <div className="hud">
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div className="hud-col">
         <div className="panel title">{plan.title}</div>
         <div className="panel">
           {room?.name ?? ""} · Room {(plan.rooms.findIndex((r) => r.id === currentRoomId) + 1)}/
           {plan.rooms.length}
         </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+      <div className="hud-col right">
         <div className="panel">
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>INVENTORY</div>
           <div className="inventory">
-            {inventory.length === 0 && <span style={{ color: "var(--muted)", fontSize: 12 }}>empty</span>}
+            {inventory.length === 0 && (
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>empty</span>
+            )}
             {inventory.map((it) => (
-              <span key={it} className="inv-chip">
+              <button
+                key={it}
+                className="inv-chip"
+                onClick={() => onInventoryClick(it)}
+                title="Click to inspect"
+              >
                 {prettyItemName(it)}
-              </span>
+              </button>
             ))}
           </div>
         </div>
-        <button onClick={onQuit}>Quit to menu</button>
+        <button className="quit-btn" onClick={onQuit}>
+          Quit to menu
+        </button>
       </div>
     </div>
   );
 }
 
 function prettyItemName(id: string): string {
-  if (id.startsWith("key_")) return "Key card";
-  if (id.startsWith("code_")) return "Code slip";
+  if (id.startsWith("key_")) {
+    const n = id.replace("key_room", "");
+    return `Key card #${(parseInt(n, 10) || 0) + 1}`;
+  }
+  if (id.startsWith("code_")) {
+    const n = id.replace("code_room", "");
+    return `Code slip #${(parseInt(n, 10) || 0) + 1}`;
+  }
   return id.replace(/_/g, " ");
+}
+
+function describeItem(itemId: string, plan: GamePlan): string {
+  if (itemId.startsWith("key_")) {
+    const roomId = itemId.slice(4);
+    const room = plan.rooms.find((r) => r.id === roomId);
+    return `A key card retrieved from ${room?.name ?? "an earlier room"}. It looks like it'll open this room's door.`;
+  }
+  if (itemId.startsWith("code_")) {
+    const roomId = itemId.slice(5);
+    const room = plan.rooms.find((r) => r.id === roomId);
+    const keypad = room?.objects.find((o) => o.kind === "keypad");
+    if (keypad?.solution) {
+      return `A slip of paper recovered from a container in ${room?.name ?? "this room"}.\n\nIt reads:  ${keypad.solution}\n\nUse it on the keypad on the back wall.`;
+    }
+    return "A scrap of paper with a 4-digit number scribbled on it.";
+  }
+  return `Item: ${itemId}`;
 }
 
 function ModalView({
@@ -507,6 +564,7 @@ function ModalView({
 }
 
 function titleForObject(obj: RoomObject): string {
+  if (obj.id.startsWith("inv_")) return prettyItemName(obj.name);
   switch (obj.kind) {
     case "note":
       return "A handwritten note";

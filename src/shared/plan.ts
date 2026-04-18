@@ -223,23 +223,80 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     const ridd = pickRiddle();
     const code = String(randInt(rng, 1000, 9999));
     const roomId = `room${i}`;
+    const themeForCustom = req.theme ? `${req.theme}, ` : "";
+
+    /**
+     * Slot-based layout — every prop is placed in a named slot so we never get
+     * overlaps and the room reads cleanly left-to-right:
+     *
+     *   ┌─────────────────────────────────────────────────────────────────┐
+     *   │  WALL_LEFT (deco1)         WALL_MID (keypad)    WALL_RIGHT (door)│ ← back wall
+     *   │                                                                  │
+     *   ├─── horizon  ────────────────────────────────────────────────────┤
+     *   │ FLOOR_LEFT (deco2)   FLOOR_MID (container)   FLOOR_RIGHT (note) │ ← floor
+     *   │                                                                  │
+     *   │ ↳ player walks along the floor band                              │
+     *   └─────────────────────────────────────────────────────────────────┘
+     *
+     * The door is always pinned to the right edge so the next-room transition
+     * reads naturally. Decor never overlaps the keypad column or the door.
+     */
+    const WALL_TOP = 110; // top of the back-wall band
+    const WALL_BOT = FLOOR_TOP - 20; // bottom of back-wall band
+    const FLOOR_BOT = H - 30;
+
+    // door — always right side, pinned to back wall, tall
+    const doorW = 150;
+    const doorH = 290;
+    const doorX = W - doorW - 22;
+    const doorY = WALL_TOP - 10;
+
+    // keypad — back wall, middle-left of door, kept clear of wall-deco
+    const keypadW = 90;
+    const keypadH = 120;
+    const keypadX = randInt(rng, 140, 240);
+    const keypadY = WALL_TOP + 30;
+
+    // wall-deco — back wall far left, kept clear of the keypad column
+    const wallDecoW = 90;
+    const wallDecoH = 140;
+    const wallDecoX = randInt(rng, 8, 18);
+    const wallDecoY = WALL_BOT - wallDecoH + 10;
+
+    // container — on the floor, slightly right of center, far enough from door
+    const contW = 130;
+    const contH = 120;
+    const contX = randInt(rng, 460, 540);
+    const contY = FLOOR_BOT - contH;
+
+    // floor-deco — front-left, between wall-deco and container
+    const floorDecoW = 110;
+    const floorDecoH = 130;
+    const floorDecoX = randInt(rng, 250, 340);
+    const floorDecoY = FLOOR_BOT - floorDecoH;
+
+    // note — small, on the floor between container and door so it reads
+    const noteW = 64;
+    const noteH = 56;
+    const noteMinX = contX + contW + 20;
+    const noteMaxX = Math.max(noteMinX + 10, doorX - noteW - 18);
+    const noteX = randInt(rng, noteMinX, noteMaxX);
+    const noteY = FLOOR_BOT - noteH - 6;
 
     const objects: RoomObject[] = [];
 
     // ---- DOOR / EXIT ----
-    const themeForCustom = req.theme ? `${req.theme}, ` : "";
     const doorPrompt = isLast
       ? `${themeForCustom}large heavy ornate exit door with glowing edges, ${OBJ_STYLE}`
       : `${themeForCustom}closed heavy interior door with a small panel, ${OBJ_STYLE}`;
-
     objects.push({
       id: `${roomId}_door`,
       name: "door",
       prompt: doorPrompt,
-      x: 860,
-      y: 200,
-      width: 140,
-      height: 280,
+      x: doorX,
+      y: doorY,
+      width: doorW,
+      height: doorH,
       collidable: true,
       interactable: true,
       removeBackground: true,
@@ -255,10 +312,10 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
       id: `${roomId}_keypad`,
       name: "keypad",
       prompt: `${themeForCustom}wall mounted electronic keypad with a glowing 4 digit display, ${OBJ_STYLE}`,
-      x: randInt(rng, 70, 220),
-      y: 180,
-      width: 96,
-      height: 130,
+      x: keypadX,
+      y: keypadY,
+      width: keypadW,
+      height: keypadH,
       collidable: false,
       interactable: true,
       removeBackground: true,
@@ -274,10 +331,10 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
       id: `${roomId}_note`,
       name: "note",
       prompt: `${themeForCustom}crumpled paper note with handwritten cryptic message, ${OBJ_STYLE}`,
-      x: randInt(rng, 380, 720),
-      y: randInt(rng, FLOOR_TOP + 10, H - 110),
-      width: 70,
-      height: 60,
+      x: noteX,
+      y: noteY,
+      width: noteW,
+      height: noteH,
       collidable: false,
       interactable: true,
       removeBackground: true,
@@ -295,15 +352,14 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
         : base.containerStyle === "chest"
           ? `${themeForCustom}small treasure chest slightly open, ${OBJ_STYLE}`
           : `${themeForCustom}metal storage locker slightly open, ${OBJ_STYLE}`;
-
     objects.push({
       id: `${roomId}_container`,
       name: "container",
       prompt: containerPrompt,
-      x: randInt(rng, 290, 560),
-      y: 360,
-      width: 110,
-      height: 110,
+      x: contX,
+      y: contY,
+      width: contW,
+      height: contH,
       collidable: true,
       interactable: true,
       removeBackground: true,
@@ -313,17 +369,17 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
       description: "A container. It looks locked. Maybe a clue first?",
     });
 
-    // ---- DECOR pieces ----
+    // ---- DECORATIONS (non-overlapping, on opposite sides of the room) ----
     const decoIdx0 = randInt(rng, 0, base.decoStyles.length - 1);
     objects.push({
       id: `${roomId}_deco1`,
       name: "deco1",
       prompt: `${themeForCustom}${base.decoStyles[decoIdx0]}, ${OBJ_STYLE}`,
-      x: randInt(rng, 60, 220),
-      y: randInt(rng, FLOOR_TOP - 40, H - 220),
-      width: 90,
-      height: 130,
-      collidable: true,
+      x: wallDecoX,
+      y: wallDecoY,
+      width: wallDecoW,
+      height: wallDecoH,
+      collidable: false, // back-wall deco — don't block the player
       interactable: false,
       removeBackground: true,
       kind: "decoration",
@@ -335,10 +391,10 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
       id: `${roomId}_deco2`,
       name: "deco2",
       prompt: `${themeForCustom}${base.decoStyles[decoIdx1]}, ${OBJ_STYLE}`,
-      x: randInt(rng, 600, 800),
-      y: randInt(rng, FLOOR_TOP - 30, H - 200),
-      width: 90,
-      height: 120,
+      x: floorDecoX,
+      y: floorDecoY,
+      width: floorDecoW,
+      height: floorDecoH,
       collidable: true,
       interactable: false,
       removeBackground: true,
