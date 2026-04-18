@@ -105,12 +105,25 @@ const RIDDLES: { q: string; a: string }[] = [
 interface ThemeDef {
   title: string;
   story: string;
+  /** Background prompts per room (full scene including environment). */
   bgs: string[];
+  /** Display name per room. */
   rooms: string[];
   ambient: string[];
-  containerStyle: "drawer" | "locker" | "chest";
+  /** Prompt fragment for the door object (per room). */
+  doorPrompts: string[];
+  /** Prompt fragment for the keypad / lock object on the wall. */
+  keypadPrompt: string;
+  /** Prompt fragment for the small container. */
+  containerPrompt: string;
+  /** Prompt fragment for the small clue note. */
+  notePrompt: string;
+  /** Pool of small thematic decoration objects (single objects, not buildings). */
   decoStyles: string[];
 }
+
+const BG_STYLE =
+  "interior wide shot, side-scrolling 2D perspective view, single empty room with back wall and floor visible, no characters, no people, no creatures, no text, cinematic lighting, ultra detailed concept art, painterly, 16:9";
 
 const THEMES: ThemeDef[] = [
   {
@@ -118,17 +131,26 @@ const THEMES: ThemeDef[] = [
     story:
       "You wake inside a rogue AI research lab. Self-destruct in T-minus unknown. Find the override codes and escape before the neural core melts down.",
     bgs: [
-      "dark futuristic AI laboratory interior, glowing blue server racks, holographic terminals, cinematic wide shot, side-scrolling perspective view, no people, ultra detailed concept art",
-      "abandoned cyberpunk server room, red emergency lights, tangled fiber optic cables, side-scrolling perspective view, no people, dramatic lighting, ultra detailed",
-      "secret AI vault with massive sealed bulkhead door, glowing runes of code on walls, side-scrolling perspective view, no people, ultra detailed",
+      `dark futuristic AI laboratory empty interior, glowing blue server racks along the walls, holographic readouts, ${BG_STYLE}`,
+      `abandoned cyberpunk server room empty interior, red emergency lights, tangled fiber optic cables on the walls, ${BG_STYLE}`,
+      `secret AI vault empty interior, glowing lines of code projected on the back wall, ${BG_STYLE}`,
     ],
     rooms: ["Control Room", "Server Vault", "Core Chamber"],
     ambient: ["#0b1424", "#1a0a14", "#0a1a18"],
-    containerStyle: "locker",
+    doorPrompts: [
+      "heavy futuristic sealed sliding metal door with glowing blue accents",
+      "armored bulkhead door with red status light, sci-fi",
+      "massive vault door covered in glowing circuit lines",
+    ],
+    keypadPrompt: "futuristic wall mounted electronic keypad with a glowing blue four digit display",
+    containerPrompt: "small futuristic metal storage locker, slightly open",
+    notePrompt: "small piece of crumpled paper with handwritten cryptic message",
     decoStyles: [
-      "vintage server tower with blinking LEDs",
-      "tangle of fiber optic cables glowing blue",
-      "broken holographic projector",
+      "small vintage desktop server tower with blinking LEDs",
+      "small tangle of fiber optic cables glowing blue",
+      "broken holographic projector device",
+      "lab beaker with glowing liquid",
+      "discarded VR headset",
     ],
   },
   {
@@ -136,17 +158,26 @@ const THEMES: ThemeDef[] = [
     story:
       "You're locked in a forgotten antique shop in old Beirut. Lebanese mosaics hide ancient mechanisms. Crack them before dawn or be sealed in forever.",
     bgs: [
-      "old Beirut antique shop interior, ottoman lamps, persian rugs, dusty bookshelves, side-scrolling perspective view, warm cinematic light, no people, ultra detailed",
-      "phoenician hidden chamber with stone tablets and brass mechanisms, torchlight, side-scrolling perspective view, no people, ultra detailed",
-      "rooftop courtyard above old Beirut, moonlit, ornate door covered in carvings, side-scrolling perspective view, no people, ultra detailed",
+      `old Beirut antique shop empty interior, ottoman lamps on shelves, persian rug on the floor, dusty bookshelves on the back wall, warm cinematic light, ${BG_STYLE}`,
+      `phoenician hidden chamber empty interior, stone tablets carved into the back wall, brass mechanisms, torchlight, ${BG_STYLE}`,
+      `rooftop courtyard above old Beirut at night, moonlit, ornate carved stone wall, ${BG_STYLE}`,
     ],
     rooms: ["Antique Shop", "Hidden Chamber", "Rooftop Exit"],
     ambient: ["#1a1208", "#0e0a06", "#0a1018"],
-    containerStyle: "chest",
+    doorPrompts: [
+      "old ornate carved wooden door with brass handle",
+      "heavy ancient stone door covered in phoenician carvings",
+      "tall arched ornate cedar door covered in islamic geometric carvings",
+    ],
+    keypadPrompt: "small brass mechanical lock dial with four engraved digits, antique",
+    containerPrompt: "small ornate wooden treasure chest, slightly open",
+    notePrompt: "old yellowed parchment scroll with handwritten arabic-style cryptic message",
     decoStyles: [
       "ornate ottoman oil lamp glowing",
       "stack of dusty old leather books",
       "brass arabian teapot",
+      "small persian carpet rolled up",
+      "engraved silver tray",
     ],
   },
   {
@@ -154,17 +185,26 @@ const THEMES: ThemeDef[] = [
     story:
       "Cryo-sleep failed. The starship Sigma is silent and the airlock is sealed. Reroute power, override the captain's lock, reach the escape pod.",
     bgs: [
-      "interior of a derelict spaceship corridor, flickering ceiling lights, floating dust, side-scrolling perspective view, no people, ultra detailed sci-fi concept art",
-      "spaceship engine room with broken plasma conduits, sparks, side-scrolling perspective view, no people, ultra detailed",
-      "spaceship escape pod bay with sealed circular hatch, warning lights, side-scrolling perspective view, no people, ultra detailed",
+      `interior of a derelict spaceship corridor, empty, flickering ceiling lights, floating dust, ${BG_STYLE}`,
+      `spaceship engine room empty interior, broken plasma conduits along the back wall, sparks, ${BG_STYLE}`,
+      `spaceship escape pod bay empty interior, sealed circular hatch on the back wall, warning lights, ${BG_STYLE}`,
     ],
     rooms: ["Corridor", "Engine Room", "Pod Bay"],
     ambient: ["#06101a", "#1a0c06", "#040a14"],
-    containerStyle: "locker",
+    doorPrompts: [
+      "sealed sci-fi airlock door with porthole window",
+      "armored engineering bulkhead door with rivets",
+      "circular escape pod hatch with red warning light",
+    ],
+    keypadPrompt: "wall mounted spaceship access keypad with glowing four digit display",
+    containerPrompt: "small spaceship storage locker with magnetic latch, slightly open",
+    notePrompt: "small piece of plastic data card with printed access code",
     decoStyles: [
-      "broken engineering helmet on the floor",
-      "sparking power conduit",
+      "broken engineering helmet",
+      "sparking power conduit segment",
       "floating zero-gravity coffee mug",
+      "small portable oxygen tank",
+      "discarded clipboard with technical schematics",
     ],
   },
   {
@@ -172,34 +212,82 @@ const THEMES: ThemeDef[] = [
     story:
       "You sheltered from a storm in a cabin that locked behind you. Old runes and bubbling potions hint at a way out — if you can read them in time.",
     bgs: [
-      "interior of an old witch's wooden cabin, hanging herbs, glowing potion bottles, candlelight, side-scrolling perspective view, no people, ultra detailed",
-      "stone cellar under a witch's cabin, runic circle on the floor, side-scrolling perspective view, no people, ultra detailed",
-      "moonlit forest clearing with a heavy iron gate covered in runes, side-scrolling perspective view, no people, ultra detailed",
+      `interior of an old witch wooden cabin, empty, hanging herbs from the ceiling, candlelight, ${BG_STYLE}`,
+      `stone cellar empty interior under a witch cabin, runic circle on the stone floor, ${BG_STYLE}`,
+      `moonlit forest clearing at night, ${BG_STYLE}`,
     ],
     rooms: ["Cabin", "Cellar", "Forest Gate"],
     ambient: ["#100a04", "#08040a", "#040a08"],
-    containerStyle: "chest",
+    doorPrompts: [
+      "old creaky wooden plank door with iron hinges",
+      "heavy stone cellar door with iron rivets",
+      "tall iron forest gate covered in glowing runes",
+    ],
+    keypadPrompt: "small wooden box with four engraved rune dials, mystical",
+    containerPrompt: "small wooden chest bound with iron, slightly open",
+    notePrompt: "old torn parchment with handwritten witch runes and a riddle",
     decoStyles: [
       "bubbling green potion bottle",
       "old wooden broomstick",
       "stack of spellbooks bound in leather",
+      "wooden cauldron with smoke",
+      "skull candle holder",
     ],
   },
 ];
 
+/**
+ * Build a ThemeDef on the fly from a freeform user theme. The whole story,
+ * backgrounds, props and decor are phrased in terms of the theme — never
+ * hard-coded as a "lab" or "cabin".
+ */
+function buildCustomTheme(theme: string): ThemeDef {
+  const t = theme.trim();
+  // Three sub-locations let the playthrough feel like a journey, all inside
+  // the theme's world. Phrased as "of {theme}" so the model treats {theme}
+  // as the world, not a furniture style.
+  return {
+    title: `Custom Run · ${t}`,
+    story: `You are trapped inside a place themed around ${t}. Solve the puzzles in each room to escape.`,
+    rooms: [`Entrance of ${t}`, `Heart of ${t}`, `Exit of ${t}`],
+    ambient: ["#0c0c18", "#180c10", "#0a1018"],
+    bgs: [
+      `entrance area inside the world of ${t}, empty room interior with back wall and floor visible, environment fully themed around ${t}, single empty space, ${BG_STYLE}`,
+      `central chamber inside the world of ${t}, empty room interior with thematic decorations on the back wall, environment fully themed around ${t}, ${BG_STYLE}`,
+      `exit chamber inside the world of ${t}, empty room interior with a tall ornate door on the back wall, environment fully themed around ${t}, ${BG_STYLE}`,
+    ],
+    doorPrompts: [
+      `tall ornate door themed around ${t}, fits the world of ${t}`,
+      `heavy decorated door themed around ${t}, fits the world of ${t}`,
+      `final exit door themed around ${t}, fits the world of ${t}, glowing edges`,
+    ],
+    keypadPrompt: `small four digit lock device themed around ${t}, fits the world of ${t}`,
+    containerPrompt: `small container themed around ${t}, fits the world of ${t}, slightly open`,
+    notePrompt: `small note or scroll themed around ${t}, fits the world of ${t}, with a handwritten cryptic message`,
+    decoStyles: [
+      `small thematic object related to ${t}`,
+      `small everyday item that fits inside the world of ${t}`,
+      `small symbolic prop representing ${t}`,
+      `small lit lamp or light source styled to fit ${t}`,
+      `small piece of furniture-sized prop that belongs in ${t}`,
+    ],
+  };
+}
+
 export const PLAN_CANVAS = { width: W, height: H, floorTop: FLOOR_TOP };
 
 const OBJ_STYLE =
-  "centered subject on a pure plain solid white background, isolated, no shadow, product photo style, no environment, no people, ultra detailed, sharp focus";
+  "single small object only, centered subject on a pure plain solid white background, isolated, no shadow, product photo style, no environment, no room, no building, no house, no cabin, no architecture, no people, no creatures, no text, ultra detailed, sharp focus";
 
 export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
   const seed = req.seed ?? Math.floor(Math.random() * 1e9);
   const rng = mulberry32(seed);
 
-  // If user typed a theme, blend it with a base template (use first theme)
-  // but keep visual variety by also picking randomly within prompts.
-  const base = req.theme ? THEMES[0]! : pick(rng, THEMES);
-  const titleOverride = req.theme ? `Custom Run · ${req.theme}` : base.title;
+  // When the user typed a theme we synthesise a fully theme-driven ThemeDef
+  // so backgrounds, doors, keypad, container, note and decor are ALL phrased
+  // in terms of their theme — never leak in a default lab/cabin look.
+  const base: ThemeDef = req.theme ? buildCustomTheme(req.theme) : pick(rng, THEMES);
+  const titleOverride = base.title;
 
   const numRooms = Math.max(2, Math.min(3, req.rooms ?? 3));
 
@@ -223,7 +311,6 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     const ridd = pickRiddle();
     const code = String(randInt(rng, 1000, 9999));
     const roomId = `room${i}`;
-    const themeForCustom = req.theme ? `${req.theme}, ` : "";
 
     /**
      * Slot-based layout — every prop is placed in a named slot so we never get
@@ -286,9 +373,11 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     const objects: RoomObject[] = [];
 
     // ---- DOOR / EXIT ----
+    const doorBase =
+      base.doorPrompts[i] ?? base.doorPrompts[base.doorPrompts.length - 1] ?? "heavy door";
     const doorPrompt = isLast
-      ? `${themeForCustom}large heavy ornate exit door with glowing edges, ${OBJ_STYLE}`
-      : `${themeForCustom}closed heavy interior door with a small panel, ${OBJ_STYLE}`;
+      ? `${doorBase}, large heavy ornate exit door with glowing edges, ${OBJ_STYLE}`
+      : `${doorBase}, closed, ${OBJ_STYLE}`;
     objects.push({
       id: `${roomId}_door`,
       name: "door",
@@ -311,7 +400,7 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     objects.push({
       id: `${roomId}_keypad`,
       name: "keypad",
-      prompt: `${themeForCustom}wall mounted electronic keypad with a glowing 4 digit display, ${OBJ_STYLE}`,
+      prompt: `${base.keypadPrompt}, ${OBJ_STYLE}`,
       x: keypadX,
       y: keypadY,
       width: keypadW,
@@ -330,7 +419,7 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     objects.push({
       id: `${roomId}_note`,
       name: "note",
-      prompt: `${themeForCustom}crumpled paper note with handwritten cryptic message, ${OBJ_STYLE}`,
+      prompt: `${base.notePrompt}, ${OBJ_STYLE}`,
       x: noteX,
       y: noteY,
       width: noteW,
@@ -346,16 +435,10 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     });
 
     // ---- CONTAINER (reveals code after riddle solved) ----
-    const containerPrompt =
-      base.containerStyle === "drawer"
-        ? `${themeForCustom}wooden drawer slightly open, ${OBJ_STYLE}`
-        : base.containerStyle === "chest"
-          ? `${themeForCustom}small treasure chest slightly open, ${OBJ_STYLE}`
-          : `${themeForCustom}metal storage locker slightly open, ${OBJ_STYLE}`;
     objects.push({
       id: `${roomId}_container`,
       name: "container",
-      prompt: containerPrompt,
+      prompt: `${base.containerPrompt}, ${OBJ_STYLE}`,
       x: contX,
       y: contY,
       width: contW,
@@ -374,7 +457,7 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     objects.push({
       id: `${roomId}_deco1`,
       name: "deco1",
-      prompt: `${themeForCustom}${base.decoStyles[decoIdx0]}, ${OBJ_STYLE}`,
+      prompt: `${base.decoStyles[decoIdx0]}, ${OBJ_STYLE}`,
       x: wallDecoX,
       y: wallDecoY,
       width: wallDecoW,
@@ -390,7 +473,7 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     objects.push({
       id: `${roomId}_deco2`,
       name: "deco2",
-      prompt: `${themeForCustom}${base.decoStyles[decoIdx1]}, ${OBJ_STYLE}`,
+      prompt: `${base.decoStyles[decoIdx1]}, ${OBJ_STYLE}`,
       x: floorDecoX,
       y: floorDecoY,
       width: floorDecoW,
