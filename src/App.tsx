@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { generateProceduralPlan, PLAN_CANVAS, type GamePlan, type RoomObject } from "./shared/plan";
 import { loadPlanAssets, type AssetSet, type ProgressEvent } from "./engine/assetManager";
 import { GameEngine, type InteractionRequest } from "./engine/game";
+import { isMuted, playWin, setMuted } from "./engine/audio";
 
-type Phase = "menu" | "loading" | "playing" | "won";
+type Phase = "menu" | "loading" | "briefing" | "playing" | "won" | "lost";
 
 type ModalState =
   | { kind: "info"; object: RoomObject; message?: string }
@@ -26,6 +27,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [inventoryRev, setInventoryRev] = useState(0);
   const [currentRoomId, setCurrentRoomId] = useState<string>("");
+  const [secondsLeft, setSecondsLeft] = useState<number>(0);
+  const [muted, setMutedState] = useState<boolean>(isMuted());
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
@@ -82,7 +85,9 @@ export default function App() {
           });
         });
         setAssets(set);
-        setPhase("playing");
+        // After assets are ready, show the mission briefing — only when the
+        // player accepts do we start the actual game (and the timer).
+        setPhase("briefing");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setProgress((p) => ({
@@ -107,8 +112,13 @@ export default function App() {
         showToast(room.intro);
       },
       onWin: () => {
+        playWin();
         setPhase("won");
       },
+      onLose: () => {
+        setPhase("lost");
+      },
+      onTimeTick: (s) => setSecondsLeft(s),
     });
     engineRef.current = engine;
     setCurrentRoomId(engine.getCurrentRoom().id);
@@ -134,7 +144,7 @@ export default function App() {
         case "item": {
           if (!obj.gives) return;
           if (!engine.hasItem(obj.gives)) {
-            engine.giveItem(obj.gives);
+            engine.collectItem(obj.gives);
             setInventoryRev((n) => n + 1);
             showToast(`Picked up an offering. (${engine.getState().inventory.size} carried)`);
           }
@@ -245,7 +255,19 @@ export default function App() {
 
       {phase === "loading" && <LoadingScreen progress={progress} />}
 
-      {(phase === "playing" || phase === "won") && plan && assets && (
+      {phase === "briefing" && plan && (
+        <BriefingScreen
+          plan={plan}
+          onBegin={() => setPhase("playing")}
+          onCancel={() => {
+            setPhase("menu");
+            setPlan(null);
+            setAssets(null);
+          }}
+        />
+      )}
+
+      {(phase === "playing" || phase === "won" || phase === "lost") && plan && assets && (
         <div className="game-wrap">
           <canvas
             ref={canvasRef}
@@ -262,6 +284,13 @@ export default function App() {
             currentRoomId={currentRoomId}
             inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
             invRev={inventoryRev}
+            secondsLeft={secondsLeft}
+            muted={muted}
+            onToggleMute={() => {
+              const next = !muted;
+              setMuted(next);
+              setMutedState(next);
+            }}
             onQuit={() => {
               engineRef.current?.stop();
               setPhase("menu");
@@ -323,16 +352,40 @@ export default function App() {
             <div className="win-screen">
               <div className="card">
                 <h1>You escaped.</h1>
-                <p>{plan.title}</p>
+                <p style={{ marginBottom: 6 }}>{plan.title}</p>
+                <p style={{ color: "var(--ok)", marginBottom: 24 }}>
+                  Time remaining: {formatTime(secondsLeft)}
+                </p>
                 <button
                   className="primary"
                   onClick={() => {
+                    engineRef.current?.stop();
                     setPhase("menu");
                     setPlan(null);
                     setAssets(null);
                   }}
                 >
                   New Game
+                </button>
+              </div>
+            </div>
+          )}
+          {phase === "lost" && (
+            <div className="win-screen lost">
+              <div className="card">
+                <h1 className="lost-title">Time's up.</h1>
+                <p style={{ marginBottom: 6 }}>{plan.title}</p>
+                <p style={{ color: "var(--danger)", marginBottom: 24 }}>{plan.stakes}</p>
+                <button
+                  className="primary"
+                  onClick={() => {
+                    engineRef.current?.stop();
+                    setPhase("menu");
+                    setPlan(null);
+                    setAssets(null);
+                  }}
+                >
+                  Try again
                 </button>
               </div>
             </div>
@@ -454,19 +507,25 @@ function Hud({
   currentRoomId,
   inventory,
   invRev,
+  secondsLeft,
+  muted,
   onQuit,
   onInventoryClick,
+  onToggleMute,
 }: {
   plan: GamePlan;
   currentRoomId: string;
   inventory: string[];
   invRev: number;
+  secondsLeft: number;
+  muted: boolean;
   onQuit: () => void;
   onInventoryClick: (itemId: string) => void;
+  onToggleMute: () => void;
 }) {
   const room = plan.rooms.find((r) => r.id === currentRoomId);
-  // touch invRev so React rerenders when inventory mutates in-place
   void invRev;
+  const lowTime = secondsLeft <= 60;
   return (
     <div className="hud">
       <div className="hud-col">
@@ -475,8 +534,16 @@ function Hud({
           {room?.name ?? ""} · Room {(plan.rooms.findIndex((r) => r.id === currentRoomId) + 1)}/
           {plan.rooms.length}
         </div>
+        <div className="panel objective" title="Mission">
+          <span className="obj-label">MISSION</span>
+          <span>{plan.mission}</span>
+        </div>
       </div>
       <div className="hud-col right">
+        <div className={`panel timer-panel ${lowTime ? "low" : ""}`}>
+          <span className="obj-label">TIME LEFT</span>
+          <span className="timer-value">{formatTime(secondsLeft)}</span>
+        </div>
         <div className="panel">
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>INVENTORY</div>
           <div className="inventory">
@@ -495,12 +562,62 @@ function Hud({
             ))}
           </div>
         </div>
-        <button className="quit-btn" onClick={onQuit}>
-          Quit to menu
+        <div style={{ display: "flex", gap: 6, pointerEvents: "auto" }}>
+          <button className="quit-btn" onClick={onToggleMute} title={muted ? "Unmute" : "Mute"}>
+            {muted ? "Unmute" : "Mute"}
+          </button>
+          <button className="quit-btn" onClick={onQuit}>
+            Quit
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BriefingScreen({
+  plan,
+  onBegin,
+  onCancel,
+}: {
+  plan: GamePlan;
+  onBegin: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="menu briefing">
+      <h1>{plan.title}</h1>
+      <div className="briefing-block">
+        <div className="briefing-tag">THE HOOK</div>
+        <p>{plan.hook}</p>
+      </div>
+      <div className="briefing-block">
+        <div className="briefing-tag">YOUR MISSION</div>
+        <p>{plan.mission}</p>
+      </div>
+      <div className="briefing-block stakes">
+        <div className="briefing-tag">THE STAKES</div>
+        <p>{plan.stakes}</p>
+      </div>
+      <div className="briefing-block">
+        <div className="briefing-tag">TIME ON THE CLOCK</div>
+        <p className="briefing-time">{formatTime(plan.timeLimitSec)}</p>
+      </div>
+      <div className="actions">
+        <button onClick={onCancel}>Back</button>
+        <button className="primary" onClick={onBegin}>
+          Begin
         </button>
       </div>
     </div>
   );
+}
+
+function formatTime(s: number): string {
+  if (s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
 function prettyItemName(id: string): string {

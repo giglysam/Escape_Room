@@ -408,6 +408,7 @@ textarea:focus {
 .win-screen .card {
   text-align: center;
   padding: 40px;
+  max-width: 560px;
 }
 .win-screen h1 {
   font-size: 48px;
@@ -419,7 +420,86 @@ textarea:focus {
 }
 .win-screen p {
   color: var(--muted);
-  margin-bottom: 24px;
+}
+.win-screen.lost {
+  background: radial-gradient(circle at 50% 40%, rgba(255, 32, 50, 0.35), transparent 60%),
+    rgba(7, 7, 13, 0.9);
+}
+.win-screen .lost-title {
+  background: linear-gradient(120deg, #ff5d6c, #ffb84d);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---------- Objective + timer in HUD ---------- */
+.hud .panel.objective {
+  max-width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hud .obj-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+.hud .timer-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 110px;
+}
+.hud .timer-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent-2);
+}
+.hud .timer-panel.low .timer-value {
+  color: var(--danger);
+  animation: pulseTimer 0.8s ease-in-out infinite;
+}
+@keyframes pulseTimer {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ---------- Briefing screen ---------- */
+.menu.briefing {
+  width: min(640px, 100%);
+  max-height: 92vh;
+  overflow: auto;
+}
+.briefing-block {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+}
+.briefing-block p {
+  margin: 6px 0 0;
+  line-height: 1.55;
+  color: var(--fg);
+}
+.briefing-block.stakes {
+  border-color: rgba(255, 93, 108, 0.35);
+  background: rgba(255, 93, 108, 0.06);
+}
+.briefing-tag {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+.briefing-time {
+  font-family: ui-monospace, monospace;
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--accent-2);
+  margin-top: 4px;
 }
 
 /* Spinner for menu/loading */

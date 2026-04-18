@@ -80,6 +80,16 @@ export interface GamePlan {
   title: string;
   story: string;
   difficulty: string;
+  /**
+   * Section 1 of the blueprint — Core Concept & Narrative.
+   * These fields are used by the briefing screen, the persistent objective
+   * banner, and the timeout / lose-state messaging.
+   */
+  mission: string;
+  hook: string;
+  stakes: string;
+  /** Total seconds available to escape across all rooms. */
+  timeLimitSec: number;
   rooms: RoomPlan[];
 }
 
@@ -114,6 +124,10 @@ const SYMBOL_POOL = ["✦", "✧", "✪", "✺", "❖", "✷", "✶", "❂", "�
 interface ThemeDef {
   title: string;
   story: string;
+  /** Mission / Hook / Stakes per the blueprint section 1. */
+  mission: string;
+  hook: string;
+  stakes: string;
   /** Background prompts per room (full scene including environment). */
   bgs: string[];
   /** Display name per room. */
@@ -143,6 +157,9 @@ const THEMES: ThemeDef[] = [
     title: "Neural Lab Breakout",
     story:
       "You wake inside a rogue AI research lab. Self-destruct in T-minus unknown. Find the override codes and escape before the neural core melts down.",
+    mission: "Reach the surface airlock before the neural core melts down.",
+    hook: "An encrypted ping woke you in cold storage. The lab is on emergency power, the AI is still online, and only the maintenance corridors are unlocked.",
+    stakes: "If you fail, the core breaches and the entire research wing — and you with it — is reduced to slag.",
     bgs: [
       `dark futuristic AI laboratory empty interior, glowing blue server racks along the walls, holographic readouts, ${BG_STYLE}`,
       `abandoned cyberpunk server room empty interior, red emergency lights, tangled fiber optic cables on the walls, ${BG_STYLE}`,
@@ -181,6 +198,9 @@ const THEMES: ThemeDef[] = [
     title: "Beirut Antiquarian Heist",
     story:
       "You're locked in a forgotten antique shop in old Beirut. Lebanese mosaics hide ancient mechanisms. Crack them before dawn or be sealed in forever.",
+    mission: "Reach the rooftop courtyard before the call to dawn prayer.",
+    hook: "The collector who hired you vanished an hour ago. The shop's door bolted itself the moment you stepped inside, and the mosaics on the walls have started glowing.",
+    stakes: "At first light the building's ancient lock-stones fuse permanently — you stay buried with the artifacts forever.",
     bgs: [
       `old Beirut antique shop empty interior, ottoman lamps on shelves, persian rug on the floor, dusty bookshelves on the back wall, warm cinematic light, ${BG_STYLE}`,
       `phoenician hidden chamber empty interior, stone tablets carved into the back wall, brass mechanisms, torchlight, ${BG_STYLE}`,
@@ -219,6 +239,9 @@ const THEMES: ThemeDef[] = [
     title: "Derelict Starship Sigma",
     story:
       "Cryo-sleep failed. The starship Sigma is silent and the airlock is sealed. Reroute power, override the captain's lock, reach the escape pod.",
+    mission: "Reach Escape Pod Bay 3 before life support runs out.",
+    hook: "Your cryo-pod popped open hours after the rest of the crew vanished. Comms are dead. The ship is drifting toward a star, and atmospheric pressure is dropping by the minute.",
+    stakes: "Fail and the hull boils away as Sigma falls into the corona — you are vapor.",
     bgs: [
       `interior of a derelict spaceship corridor, empty, flickering ceiling lights, floating dust, ${BG_STYLE}`,
       `spaceship engine room empty interior, broken plasma conduits along the back wall, sparks, ${BG_STYLE}`,
@@ -257,6 +280,9 @@ const THEMES: ThemeDef[] = [
     title: "Witch's Mountain Cabin",
     story:
       "You sheltered from a storm in a cabin that locked behind you. Old runes and bubbling potions hint at a way out — if you can read them in time.",
+    mission: "Reach the forest gate before the witch returns from her hunt.",
+    hook: "The storm chased you into a cabin you didn't choose. The door slammed itself shut and the candles lit themselves the moment you crossed the threshold.",
+    stakes: "When the witch comes home she'll add you to her shelf of curiosities — labelled and preserved.",
     bgs: [
       `interior of an old witch wooden cabin, empty, hanging herbs from the ceiling, candlelight, ${BG_STYLE}`,
       `stone cellar empty interior under a witch cabin, runic circle on the stone floor, ${BG_STYLE}`,
@@ -306,6 +332,9 @@ function buildCustomTheme(theme: string): ThemeDef {
   return {
     title: `Custom Run · ${t}`,
     story: `You are trapped inside a place themed around ${t}. Solve the puzzles in each room to escape.`,
+    mission: `Reach the final exit of the world of ${t} before time runs out.`,
+    hook: `You woke up inside the world of ${t}. The way you came in has sealed itself behind you, and three locked rooms stand between you and the outside.`,
+    stakes: `If the timer hits zero, the world of ${t} collapses inward and you are lost in it forever.`,
     rooms: [`Entrance of ${t}`, `Heart of ${t}`, `Exit of ${t}`],
     ambient: ["#0c0c18", "#180c10", "#0a1018"],
     bgs: [
@@ -366,10 +395,20 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     rooms.push(buildRoom(rng, base, i, numRooms, arch));
   }
 
+  // Difficulty → time budget. Easier runs give more thinking time. The
+  // blueprint says easy start, hard middle, adrenaline finish — the timer
+  // creates the climax automatically.
+  const difficulty = req.difficulty ?? "normal";
+  const baseSeconds = difficulty === "easy" ? 540 : difficulty === "hard" ? 300 : 420;
+
   return {
     title: titleOverride,
     story: base.story,
-    difficulty: req.difficulty ?? "normal",
+    difficulty,
+    mission: base.mission,
+    hook: base.hook,
+    stakes: base.stakes,
+    timeLimitSec: baseSeconds,
     rooms,
   };
 }
@@ -465,15 +504,19 @@ function buildRoom(
   const roomId = `room${i}`;
   const layout = makeLayout();
 
+  // Difficulty curve: room 0 = easy / 3 elements, mid = 4, last = 5.
+  // Scales the size of the active puzzle so later rooms feel harder.
+  const elements = isFirst ? 3 : isLast ? 5 : 4;
+
   let objects: RoomObject[];
   let archIntro: string;
 
   if (arch === "collect") {
-    [objects, archIntro] = buildCollectRoom(rng, base, i, isLast, layout);
+    [objects, archIntro] = buildCollectRoom(rng, base, i, isLast, layout, elements);
   } else if (arch === "sequence") {
-    [objects, archIntro] = buildSequenceRoom(rng, base, i, isLast, layout);
+    [objects, archIntro] = buildSequenceRoom(rng, base, i, isLast, layout, elements);
   } else {
-    [objects, archIntro] = buildSwitchesRoom(rng, base, i, isLast, layout);
+    [objects, archIntro] = buildSwitchesRoom(rng, base, i, isLast, layout, elements);
   }
 
   const baseIntro = isFirst
@@ -500,9 +543,11 @@ function buildCollectRoom(
   i: number,
   isLast: boolean,
   layout: RoomLayout,
+  elements: number,
 ): [RoomObject[], string] {
   const roomId = `room${i}`;
   const objects: RoomObject[] = [];
+  const N = Math.max(2, Math.min(5, elements));
 
   objects.push(
     makeDoor(
@@ -510,19 +555,26 @@ function buildCollectRoom(
       i,
       isLast,
       layout,
-      "A heavy door. The lock takes three offerings — find them and place them on the pedestal.",
+      `A heavy door. The lock takes ${N} offerings — find them and place them on the pedestal.`,
     ),
   );
   objects.push(makeWallDeco(base, rng, i, layout));
 
-  // 3 collectible items spread across the floor
-  const itemSlots = [
-    { x: randInt(rng, 70, 130), y: layout.FLOOR_BOT - 70, w: 60, h: 60 },
-    { x: randInt(rng, 290, 360), y: layout.FLOOR_BOT - 70, w: 60, h: 60 },
-    { x: randInt(rng, 720, 770), y: layout.FLOOR_BOT - 70, w: 60, h: 60 },
-  ];
+  // Spread N item slots across the floor band, leaving space for the pedestal
+  // at center-back. Slot 0 = far left, last slot = far right.
+  const itemSlots: { x: number; y: number; w: number; h: number }[] = [];
+  const lanes = N;
+  const laneW = 800 / lanes;
+  for (let k = 0; k < N; k++) {
+    const cx = 60 + laneW * k + randInt(rng, 0, Math.max(1, Math.floor(laneW - 70)));
+    // alternate between low (front floor) and high (back floor) so they read
+    const high = k % 2 === 0;
+    const y = high ? layout.FLOOR_BOT - 65 : layout.FLOOR_BOT - 105;
+    itemSlots.push({ x: cx, y, w: 60, h: 60 });
+  }
+
   const itemIds: string[] = [];
-  for (let k = 0; k < 3; k++) {
+  for (let k = 0; k < N; k++) {
     const id = `${roomId}_item${k}`;
     const slot = itemSlots[k]!;
     const promptIdx = k % base.itemPrompts.length;
@@ -545,27 +597,27 @@ function buildCollectRoom(
     itemIds.push(id);
   }
 
-  // pedestal — back-wall mid, accepts the three items
+  // pedestal — center on back floor, accepts all items
   objects.push({
     id: `${roomId}_pedestal`,
     name: "pedestal",
     prompt: `${base.pedestalPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 460, 540),
-    y: layout.FLOOR_BOT - 150,
-    width: 150,
-    height: 150,
+    x: randInt(rng, 440, 520),
+    y: layout.FLOOR_BOT - 160,
+    width: 160,
+    height: 160,
     collidable: true,
     interactable: true,
     removeBackground: true,
     kind: "pedestal",
     acceptsItems: itemIds,
     puzzle: "collect",
-    description: "A pedestal with three empty slots. It seems to be waiting for offerings.",
+    description: `A pedestal with ${N} empty slots. It seems to be waiting for offerings.`,
   });
 
   return [
     objects,
-    "Three offerings are scattered around. Pick each one up and place it on the pedestal — in any order.",
+    `${N} offerings are scattered around. Pick each one up and place it on the pedestal — in any order.`,
   ];
 }
 
@@ -577,14 +629,16 @@ function buildSequenceRoom(
   i: number,
   isLast: boolean,
   layout: RoomLayout,
+  elements: number,
 ): [RoomObject[], string] {
   const roomId = `room${i}`;
   const objects: RoomObject[] = [];
+  const N = Math.max(3, Math.min(5, elements));
 
-  // Pick 4 unique symbols
+  // Pick N unique symbols
   const pool = [...SYMBOL_POOL];
   const seq: string[] = [];
-  for (let k = 0; k < 4; k++) {
+  for (let k = 0; k < N; k++) {
     const idx = randInt(rng, 0, pool.length - 1);
     seq.push(pool.splice(idx, 1)[0]!);
   }
@@ -615,29 +669,30 @@ function buildSequenceRoom(
     kind: "sequence_clue",
     sequenceSymbols: seq,
     puzzle: "sequence",
-    description: "A mural shows four symbols glowing in a sequence.",
+    description: `A mural shows ${N} symbols glowing in a sequence.`,
   });
 
-  // 4 buttons on the back wall, displayed in *shuffled* order so the sequence
+  // N buttons on the floor band, displayed in *shuffled* order so the sequence
   // matters (not just left-to-right).
-  const order = [0, 1, 2, 3];
+  const order = Array.from({ length: N }, (_, k) => k);
   for (let s = order.length - 1; s > 0; s--) {
     const j = randInt(rng, 0, s);
     [order[s], order[j]] = [order[j]!, order[s]!];
   }
   const buttonY = layout.FLOOR_BOT - 90;
+  const totalW = 800;
+  const stepX = totalW / N;
   const startX = 70;
-  const stepX = 130;
-  for (let k = 0; k < 4; k++) {
+  for (let k = 0; k < N; k++) {
     const symbolIdx = order[k]!;
     objects.push({
       id: `${roomId}_btn${k}`,
       name: `btn${k}`,
       prompt: `${base.buttonPrompt}, ${OBJ_STYLE}`,
-      x: startX + k * stepX,
+      x: Math.round(startX + k * stepX),
       y: buttonY,
-      width: 80,
-      height: 80,
+      width: 78,
+      height: 78,
       collidable: false,
       interactable: true,
       removeBackground: true,
@@ -651,7 +706,7 @@ function buildSequenceRoom(
 
   return [
     objects,
-    "Read the mural's order, then press the four wall buttons in the correct sequence.",
+    `Read the mural's order, then press the ${N} wall buttons in the correct sequence.`,
   ];
 }
 
@@ -663,25 +718,30 @@ function buildSwitchesRoom(
   i: number,
   isLast: boolean,
   layout: RoomLayout,
+  elements: number,
 ): [RoomObject[], string] {
   const roomId = `room${i}`;
   const objects: RoomObject[] = [];
+  const N = Math.max(3, Math.min(6, elements));
 
-  // Target pattern: 4 booleans, at least 2 ON, at least 1 OFF
+  // Target pattern: N booleans, ensure between ⌈N/3⌉ and N-1 are ON so it's
+  // never trivial (all on / all off) and never empty.
+  const minOn = Math.ceil(N / 3);
+  const maxOn = N - 1;
   let target: boolean[] = [];
-  let triesLeft = 32;
+  let triesLeft = 64;
   do {
-    target = [0, 1, 2, 3].map(() => rng() < 0.5);
+    target = Array.from({ length: N }, () => rng() < 0.5);
     triesLeft--;
   } while (
     triesLeft > 0 &&
-    (target.filter((b) => b).length < 2 || target.filter((b) => b).length > 3)
+    (target.filter((b) => b).length < minOn || target.filter((b) => b).length > maxOn)
   );
 
   // Initial pattern — guarantee it doesn't already match
   let initial: boolean[] = [];
   do {
-    initial = [0, 1, 2, 3].map(() => rng() < 0.5);
+    initial = Array.from({ length: N }, () => rng() < 0.5);
   } while (initial.every((v, idx) => v === target[idx]));
 
   objects.push(
@@ -695,18 +755,19 @@ function buildSwitchesRoom(
   );
   objects.push(makeWallDeco(base, rng, i, layout));
 
-  // 4 switches on the back wall
+  // Switches across the back wall — distribute evenly
   const switchY = layout.WALL_TOP + 50;
+  const totalW = 800;
+  const stepX = totalW / N;
   const startX = 60;
-  const stepX = 130;
-  for (let k = 0; k < 4; k++) {
+  for (let k = 0; k < N; k++) {
     objects.push({
       id: `${roomId}_sw${k}`,
       name: `sw${k}`,
       prompt: `${base.switchPrompt}, ${OBJ_STYLE}`,
-      x: startX + k * stepX,
+      x: Math.round(startX + k * stepX),
       y: switchY,
-      width: 70,
+      width: 68,
       height: 100,
       collidable: false,
       interactable: true,
@@ -720,7 +781,6 @@ function buildSwitchesRoom(
     });
   }
 
-  // Clue prop — small floor object that shows the right pattern
   const cluePattern = target
     .map((on, idx) => `${idx + 1}:${on ? "ON" : "OFF"}`)
     .join("  ");
@@ -738,11 +798,11 @@ function buildSwitchesRoom(
     kind: "switch_clue",
     symbol: cluePattern,
     puzzle: "switches",
-    description: `A diagram. It shows which of the four switches must be ON to unlock the door:\n\n${cluePattern}`,
+    description: `A diagram. It shows which of the ${N} switches must be ON to unlock the door:\n\n${cluePattern}`,
   });
 
   return [
     objects,
-    "Find the clue prop, then set the four wall switches to the pattern it shows.",
+    `Find the clue prop, then set the ${N} wall switches to the pattern it shows.`,
   ];
 }

@@ -3,6 +3,18 @@ import { PLAN_CANVAS } from "../shared/plan";
 import type { AssetSet, RenderableAsset } from "./assetManager";
 import { fitContain } from "./imageUtils";
 import { drawPlayer, type PlayerState } from "./player";
+import {
+  playBigSuccess,
+  playClick,
+  playFail,
+  playLose,
+  playPickup,
+  playSuccess,
+  playUnlock,
+  playWarning,
+  startAmbient,
+  stopAmbient,
+} from "./audio";
 
 export interface InteractionRequest {
   object: RoomObject;
@@ -14,6 +26,8 @@ export interface GameCallbacks {
   onToast: (text: string) => void;
   onRoomChange: (room: RoomPlan) => void;
   onWin: () => void;
+  onLose: () => void;
+  onTimeTick: (secondsLeft: number) => void;
 }
 
 export interface GameState {
@@ -70,6 +84,13 @@ export class GameEngine {
   private hoveredObject: PlacedObject | null = null;
   private interactPrompt: PlacedObject | null = null;
 
+  private secondsLeft: number;
+  private lastSecondTick = 0;
+  private warned60 = false;
+  private warned30 = false;
+  private warned10 = false;
+  private gameEnded = false;
+
   constructor(
     canvas: HTMLCanvasElement,
     plan: GamePlan,
@@ -101,6 +122,7 @@ export class GameEngine {
       walkPhase: 0,
       moving: false,
     };
+    this.secondsLeft = Math.max(60, plan.timeLimitSec ?? 420);
     this.loadRoom(0);
   }
 
@@ -110,7 +132,10 @@ export class GameEngine {
     if (this.running) return;
     this.running = true;
     this.lastT = performance.now();
+    this.lastSecondTick = this.lastT;
     this.bindInput();
+    startAmbient({ intensity: 0.6 });
+    this.cb.onTimeTick(this.secondsLeft);
     this.rafId = requestAnimationFrame(this.tick);
   }
 
@@ -118,6 +143,11 @@ export class GameEngine {
     this.running = false;
     cancelAnimationFrame(this.rafId);
     this.unbindInput();
+    stopAmbient();
+  }
+
+  getSecondsLeft(): number {
+    return this.secondsLeft;
   }
 
   getState(): GameState {
@@ -144,7 +174,10 @@ export class GameEngine {
 
   /** Mark this room's door as unlocked (used after a puzzle is fully solved). */
   unlockDoor() {
-    this.setFlag(`door_${this.currentRoom.id}_unlocked`);
+    if (!this.hasFlag(`door_${this.currentRoom.id}_unlocked`)) {
+      this.setFlag(`door_${this.currentRoom.id}_unlocked`);
+      playUnlock();
+    }
   }
 
   /** Toggle a switch by id and return new state. */
@@ -152,6 +185,7 @@ export class GameEngine {
     const cur = this.state.switchStates.get(switchId) ?? false;
     const next = !cur;
     this.state.switchStates.set(switchId, next);
+    playClick();
     this.checkSwitchPuzzle();
     return next;
   }
@@ -169,13 +203,16 @@ export class GameEngine {
       const total = this.currentRoom.objects.filter((o) => o.kind === "sequence_button").length;
       if (next >= total) {
         this.state.sequenceProgress.set(roomId, next);
+        playBigSuccess();
         this.unlockDoor();
         return "complete";
       }
       this.state.sequenceProgress.set(roomId, next);
+      playSuccess();
       return "correct";
     }
     this.state.sequenceProgress.set(roomId, 0);
+    playFail();
     return "wrong";
   }
 
@@ -185,7 +222,10 @@ export class GameEngine {
 
   /** Place an item from inventory onto a pedestal. Returns true if accepted. */
   depositOnPedestal(pedestal: RoomObject, itemId: string): "accepted" | "rejected" | "complete" {
-    if (!pedestal.acceptsItems?.includes(itemId)) return "rejected";
+    if (!pedestal.acceptsItems?.includes(itemId)) {
+      playFail();
+      return "rejected";
+    }
     if (!this.hasItem(itemId)) return "rejected";
     const slot = this.state.pedestalSlots.get(pedestal.id) ?? new Set();
     if (slot.has(itemId)) return "rejected";
@@ -194,10 +234,19 @@ export class GameEngine {
     this.state.inventory.delete(itemId);
     this.state.consumedItems.add(itemId);
     if (slot.size >= pedestal.acceptsItems.length) {
+      playBigSuccess();
       this.unlockDoor();
       return "complete";
     }
+    playSuccess();
     return "accepted";
+  }
+
+  /** Player picked up a world item. */
+  collectItem(itemId: string) {
+    if (this.state.inventory.has(itemId)) return;
+    this.state.inventory.add(itemId);
+    playPickup();
   }
 
   getPedestalSlots(pedestalId: string): Set<string> {
@@ -224,11 +273,18 @@ export class GameEngine {
   advanceRoom() {
     const idx = this.state.currentRoomIndex + 1;
     if (idx >= this.plan.rooms.length) {
+      this.gameEnded = true;
       this.cb.onWin();
       return;
     }
     this.loadRoom(idx);
     this.cb.onRoomChange(this.currentRoom);
+  }
+
+  /** Add seconds to the timer (e.g. on bonus). */
+  addSeconds(s: number) {
+    this.secondsLeft = Math.max(0, this.secondsLeft + s);
+    this.cb.onTimeTick(this.secondsLeft);
   }
 
   // ---------------- Internals ----------------
@@ -381,6 +437,33 @@ export class GameEngine {
     if (!this.running) return;
     const dt = Math.min(0.05, (now - this.lastT) / 1000);
     this.lastT = now;
+
+    // Timer — count down once per real second
+    if (!this.gameEnded && now - this.lastSecondTick >= 1000) {
+      this.lastSecondTick = now;
+      this.secondsLeft = Math.max(0, this.secondsLeft - 1);
+      this.cb.onTimeTick(this.secondsLeft);
+      if (this.secondsLeft === 60 && !this.warned60) {
+        this.warned60 = true;
+        playWarning();
+        this.cb.onToast("60 seconds left.");
+      }
+      if (this.secondsLeft === 30 && !this.warned30) {
+        this.warned30 = true;
+        playWarning();
+        this.cb.onToast("30 seconds left!");
+      }
+      if (this.secondsLeft === 10 && !this.warned10) {
+        this.warned10 = true;
+        playWarning();
+      }
+      if (this.secondsLeft <= 0) {
+        this.gameEnded = true;
+        playLose();
+        this.cb.onLose();
+      }
+    }
+
     this.update(dt);
     this.draw();
     this.rafId = requestAnimationFrame(this.tick);
@@ -561,6 +644,17 @@ export class GameEngine {
     vg.addColorStop(1, "rgba(0,0,0,0.55)");
     ctx.fillStyle = vg;
     ctx.fillRect(0, 0, W, H);
+
+    // Climax tint — when time is short, throw a pulsing red tint over the
+    // whole scene. The blueprint's "Adrenaline finish": low seconds → louder
+    // visual stress.
+    if (!this.gameEnded && this.secondsLeft <= 60) {
+      const stress = 1 - this.secondsLeft / 60; // 0 at 60s, 1 at 0s
+      const pulse = (Math.sin(performance.now() / 220) + 1) / 2;
+      const alpha = Math.min(0.55, 0.12 + stress * 0.35 + pulse * stress * 0.25);
+      ctx.fillStyle = `rgba(255, 32, 50, ${alpha})`;
+      ctx.fillRect(0, 0, W, H);
+    }
   }
 
   /**
