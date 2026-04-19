@@ -144,18 +144,58 @@ export default function App() {
       if (!engine) return;
       const obj = req.object;
 
+      // Chained-room gating: every interactable can declare `requires`,
+      // a flag that must be set before it can be used. If the flag is
+      // missing, show a hint and bail.
+      if (
+        obj.requires &&
+        obj.kind !== "door" &&
+        obj.kind !== "exit" &&
+        !engine.hasFlag(obj.requires) &&
+        !engine.hasItem(obj.requires)
+      ) {
+        showToast("You can't use this yet — something else first.");
+        return;
+      }
+
       switch (obj.kind) {
         // ---------- A) COLLECT & COMBINE ----------
         case "item": {
           if (!obj.gives) return;
-          if (!engine.hasItem(obj.gives)) {
+          if (!engine.hasItem(obj.gives) && !engine.hasFlag(obj.gives)) {
             engine.collectItem(obj.gives);
+            engine.setFlag(obj.gives);
             setInventoryRev((n) => n + 1);
-            showToast(`Picked up an offering. (${engine.getState().inventory.size} carried)`);
+            showToast(`Picked up: ${prettyItemName(obj.gives)}.`);
           }
           return;
         }
         case "pedestal": {
+          // Chained-room mode: if pedestal accepts a single flag-id and we
+          // already have it, consume it inline; otherwise open the modal
+          // for multi-item pedestals (legacy collect rooms).
+          const accepts = obj.acceptsItems ?? [];
+          if (accepts.length === 1 && obj.gives) {
+            const need = accepts[0]!;
+            if (engine.hasItem(need) || engine.hasFlag(need)) {
+              // Consume the inventory item and set the give-flag.
+              if (engine.hasItem(need)) {
+                engine.getState().inventory.delete(need);
+                engine.getState().consumedItems.add(need);
+              }
+              engine.setFlag(obj.gives);
+              if (obj.gives.startsWith("door_")) engine.unlockDoor();
+              setInventoryRev((n) => n + 1);
+              setModal({
+                kind: "info",
+                object: obj,
+                message: "It clicks into place. Something just changed in the room.",
+              });
+              return;
+            }
+            showToast("It needs something you don't have yet.");
+            return;
+          }
           setModal({ kind: "pedestal", object: obj });
           return;
         }
@@ -189,6 +229,16 @@ export default function App() {
           const next = engine.toggleSwitch(obj.id);
           setInventoryRev((n) => n + 1);
           showToast(`Switch ${obj.symbol ?? ""} → ${next ? "ON" : "OFF"}`);
+          // Chained-room: if this switch's `gives` flag is part of the
+          // chain and the switch is now in its target state, set the
+          // flag so the next step unlocks.
+          if (obj.gives && next === !!obj.targetOn && !engine.hasFlag(obj.gives)) {
+            engine.setFlag(obj.gives);
+            setTimeout(
+              () => showToast("Something in the room just woke up."),
+              250,
+            );
+          }
           if (engine.isDoorUnlocked()) {
             setTimeout(
               () =>

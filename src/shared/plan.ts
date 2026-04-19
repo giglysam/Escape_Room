@@ -121,7 +121,8 @@ function pick<T>(rng: () => number, arr: T[]): T {
 /** Unicode glyphs we use for the on-screen symbol sequence puzzle. They are
  * deliberately abstract so they read as "ancient runes / glyphs / sigils"
  * regardless of theme. */
-const SYMBOL_POOL = ["✦", "✧", "✪", "✺", "❖", "✷", "✶", "❂", "☥", "✹"];
+// (Hardcoded sequence pool now lives inside buildChainedRoom for the
+// optional 4-button sequence lock at step 7.)
 
 interface ThemeDef {
   title: string;
@@ -563,13 +564,14 @@ interface RoomLayout {
 }
 
 function makeLayout(): RoomLayout {
-  const WALL_TOP = 130;
-  const WALL_BOT = FLOOR_TOP - 20;
-  const FLOOR_BOT = H - 40;
-  const doorW = 180;
-  const doorH = 340;
-  const doorX = W - doorW - 30;
-  const doorY = WALL_TOP - 10;
+  const WALL_TOP = 120;
+  const WALL_BOT = FLOOR_TOP - 10;
+  const FLOOR_BOT = H - 30;
+  // REM-style door: tall, base sits on the floor (door bottom = FLOOR_BOT)
+  const doorW = 200;
+  const doorH = 440;
+  const doorX = W - doorW - 60;
+  const doorY = FLOOR_BOT - doorH; // bottom of door touches the floor band
   return { WALL_TOP, WALL_BOT, FLOOR_BOT, doorX, doorY, doorW, doorH };
 }
 
@@ -632,27 +634,19 @@ function buildRoom(
   base: ThemeDef,
   i: number,
   numRooms: number,
-  arch: PuzzleArchetype,
+  _arch: PuzzleArchetype,
 ): RoomPlan {
+  void _arch; // archetype is now ignored — every room is chained
   const isLast = i === numRooms - 1;
   const isFirst = i === 0;
   const roomId = `room${i}`;
   const layout = makeLayout();
 
-  // Difficulty curve: room 0 = easy / 3 elements, mid = 4, last = 5.
-  // Scales the size of the active puzzle so later rooms feel harder.
-  const elements = isFirst ? 3 : isLast ? 5 : 4;
+  // Difficulty curve: room 0 = 5 chained steps, room 1 = 6, room 2 = 7.
+  // Each step gates the next via flags, REM-style.
+  const stepCount = isFirst ? 5 : isLast ? 7 : 6;
 
-  let objects: RoomObject[];
-  let archIntro: string;
-
-  if (arch === "collect") {
-    [objects, archIntro] = buildCollectRoom(rng, base, i, isLast, layout, elements);
-  } else if (arch === "sequence") {
-    [objects, archIntro] = buildSequenceRoom(rng, base, i, isLast, layout, elements);
-  } else {
-    [objects, archIntro] = buildSwitchesRoom(rng, base, i, isLast, layout, elements);
-  }
+  const [objects, archIntro] = buildChainedRoom(rng, base, i, isLast, layout, stepCount);
 
   const baseIntro = isFirst
     ? `You wake up in the ${base.rooms[i]}. The door behind you is sealed.`
@@ -670,274 +664,252 @@ function buildRoom(
   };
 }
 
-// ---------------- A) COLLECT & COMBINE ----------------
+// ===============================================================
+// Chained room builder — Room Escape Maker style
+// ===============================================================
+//
+// Every room is now a 5–7 step *chain* of mixed mechanics, instead of
+// one flavour of puzzle. Each step writes a flag that gates the next
+// step, exactly like REM games (Dog Escape, Halloween Nightmare, etc.).
+//
+// The chain template:
+//   1. SWITCH    — wake the room (lights on / power on / reveal)
+//   2. ITEM      — small object on the floor, revealed by step 1
+//   3. CONTAINER — chest/box on the floor, opens with item from step 2
+//   4. ITEM      — second small object, dropped from container
+//   5. PEDESTAL  — back-wall altar, needs the item from step 4
+//   6. KEY       — appears on the floor when pedestal is fed (last room only)
+//   7. DOOR      — ground-touching, opens when its prerequisite flag is set
+//
+// All `requires` / `gives` strings are scoped per room (`roomN_step_X`)
+// so flags from previous rooms never bleed into later ones.
 
-function buildCollectRoom(
+function gridY(layout: RoomLayout, anchor: "wall_top" | "wall_mid" | "floor_back" | "floor_front", h: number): number {
+  switch (anchor) {
+    case "wall_top": // back-wall, near top
+      return layout.WALL_TOP + 20;
+    case "wall_mid": // back-wall, middle (around eye-level)
+      return layout.WALL_TOP + 80;
+    case "floor_back": // standing on the floor, back row (closer to wall)
+      return layout.FLOOR_BOT - h - 20;
+    case "floor_front": // standing on the floor, front row (closer to camera)
+      return layout.FLOOR_BOT - h - 4;
+  }
+}
+
+function buildChainedRoom(
   rng: () => number,
   base: ThemeDef,
   i: number,
   isLast: boolean,
   layout: RoomLayout,
-  elements: number,
+  stepCount: number,
 ): [RoomObject[], string] {
   const roomId = `room${i}`;
   const objects: RoomObject[] = [];
-  const N = Math.max(2, Math.min(5, elements));
 
-  objects.push(
-    makeDoor(
-      base,
-      i,
-      isLast,
-      layout,
-      `A heavy door. The lock takes ${N} offerings — find them and place them on the pedestal.`,
-    ),
-  );
-  objects.push(makeWallDeco(base, rng, i, layout));
+  // Flag sequence: each step gives `flag_k` and the next step requires it.
+  const flag = (k: number) => `${roomId}_flag_${k}`;
+  const doorFlag = `door_${roomId}_unlocked`;
 
-  // Spread N item slots across the floor band, leaving space for the pedestal
-  // at center-back. Slot 0 = far left, last slot = far right.
-  const itemSlots: { x: number; y: number; w: number; h: number }[] = [];
-  const lanes = N;
-  const laneW = 1020 / lanes;
-  for (let k = 0; k < N; k++) {
-    const cx = 60 + laneW * k + randInt(rng, 0, Math.max(1, Math.floor(laneW - 70)));
-    // alternate between low (front floor) and high (back floor) so they read
-    const high = k % 2 === 0;
-    const y = high ? layout.FLOOR_BOT - 65 : layout.FLOOR_BOT - 105;
-    itemSlots.push({ x: cx, y, w: 60, h: 60 });
-  }
-
-  const itemIds: string[] = [];
-  for (let k = 0; k < N; k++) {
-    const id = `${roomId}_item${k}`;
-    const slot = itemSlots[k]!;
-    const promptIdx = k % base.itemPrompts.length;
-    objects.push({
-      id,
-      name: `item${k}`,
-      prompt: `${base.itemPrompts[promptIdx]}, ${OBJ_STYLE}`,
-      x: slot.x,
-      y: slot.y,
-      width: slot.w,
-      height: slot.h,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "item",
-      gives: id,
-      puzzle: "collect",
-      description: "A small object. You can pick it up.",
-    });
-    itemIds.push(id);
-  }
-
-  // pedestal — center on back floor, accepts all items
+  // ---- STEP 1: WALL SWITCH on the back wall ----
+  const sw1Y = gridY(layout, "wall_mid", 100);
   objects.push({
-    id: `${roomId}_pedestal`,
-    name: "pedestal",
-    prompt: `${base.pedestalPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 540, 660),
-    y: layout.FLOOR_BOT - 160,
-    width: 160,
-    height: 160,
+    id: `${roomId}_step1_switch`,
+    name: "main_switch",
+    prompt: `${base.switchPrompt}, ${OBJ_STYLE}`,
+    x: 110,
+    y: sw1Y,
+    width: 70,
+    height: 110,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "switch",
+    symbol: "1",
+    initialOn: false,
+    targetOn: true,
+    gives: flag(1),
+    description: "A wall switch. It looks like the master power.",
+  });
+
+  // ---- STEP 2: small ITEM on the floor (revealed by switch) ----
+  objects.push({
+    id: `${roomId}_step2_item`,
+    name: "key_a",
+    prompt: `${base.itemPrompts[0] ?? "small thematic item"}, ${OBJ_STYLE}`,
+    x: randInt(rng, 230, 320),
+    y: gridY(layout, "floor_front", 56),
+    width: 60,
+    height: 56,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "item",
+    requires: flag(1),
+    gives: flag(2),
+    description: "A small object lying on the floor.",
+  });
+
+  // ---- STEP 3: CONTAINER on the floor (opens with the step-2 item) ----
+  objects.push({
+    id: `${roomId}_step3_container`,
+    name: "container",
+    prompt: `small thematic chest or storage box that fits inside the world, ${base.pedestalPrompt}, ${OBJ_STYLE}`,
+    x: randInt(rng, 380, 460),
+    y: gridY(layout, "floor_back", 130),
+    width: 130,
+    height: 130,
     collidable: true,
     interactable: true,
     removeBackground: true,
     kind: "pedestal",
-    acceptsItems: itemIds,
-    puzzle: "collect",
-    description: `A pedestal with ${N} empty slots. It seems to be waiting for offerings.`,
+    acceptsItems: [flag(2)],
+    requires: flag(2),
+    gives: flag(3),
+    description: "A small chest. It looks like it might fit something.",
   });
 
-  return [
-    objects,
-    `${N} offerings are scattered around. Pick each one up and place it on the pedestal — in any order.`,
-  ];
-}
-
-// ---------------- B) SYMBOL SEQUENCE ----------------
-
-function buildSequenceRoom(
-  rng: () => number,
-  base: ThemeDef,
-  i: number,
-  isLast: boolean,
-  layout: RoomLayout,
-  elements: number,
-): [RoomObject[], string] {
-  const roomId = `room${i}`;
-  const objects: RoomObject[] = [];
-  const N = Math.max(3, Math.min(5, elements));
-
-  // Pick N unique symbols
-  const pool = [...SYMBOL_POOL];
-  const seq: string[] = [];
-  for (let k = 0; k < N; k++) {
-    const idx = randInt(rng, 0, pool.length - 1);
-    seq.push(pool.splice(idx, 1)[0]!);
+  // ---- STEP 4: second ITEM (revealed when container opens) ----
+  if (stepCount >= 4) {
+    objects.push({
+      id: `${roomId}_step4_item`,
+      name: "key_b",
+      prompt: `${base.itemPrompts[1] ?? "small thematic item"}, ${OBJ_STYLE}`,
+      x: randInt(rng, 540, 620),
+      y: gridY(layout, "floor_front", 56),
+      width: 60,
+      height: 56,
+      collidable: false,
+      interactable: true,
+      removeBackground: true,
+      kind: "item",
+      requires: flag(3),
+      gives: flag(4),
+      description: "A second small object.",
+    });
   }
 
+  // ---- STEP 5: PEDESTAL/altar on the back wall, accepts the step-4 item ----
+  if (stepCount >= 5) {
+    objects.push({
+      id: `${roomId}_step5_pedestal`,
+      name: "pedestal",
+      prompt: `${base.pedestalPrompt}, ${OBJ_STYLE}`,
+      x: randInt(rng, 660, 730),
+      y: gridY(layout, "floor_back", 160),
+      width: 160,
+      height: 160,
+      collidable: true,
+      interactable: true,
+      removeBackground: true,
+      kind: "pedestal",
+      acceptsItems: [flag(4)],
+      requires: flag(4),
+      gives: flag(5),
+      description: "A pedestal with an empty receptacle on top.",
+    });
+  }
+
+  // ---- STEP 6: small KEY/CODE — gives the door-unlock flag ----
+  if (stepCount >= 6) {
+    objects.push({
+      id: `${roomId}_step6_key`,
+      name: "door_key",
+      prompt: `${base.itemPrompts[2] ?? "small thematic key"}, ${OBJ_STYLE}`,
+      x: randInt(rng, 480, 560),
+      y: gridY(layout, "floor_front", 56),
+      width: 60,
+      height: 56,
+      collidable: false,
+      interactable: true,
+      removeBackground: true,
+      kind: "item",
+      requires: flag(5),
+      gives: doorFlag,
+      description: "A key has appeared. It must fit the door.",
+    });
+  } else {
+    // 5-step chain: pedestal directly unlocks the door.
+    const ped = objects.find((o) => o.id === `${roomId}_step5_pedestal`);
+    if (ped) ped.gives = doorFlag;
+  }
+
+  // ---- OPTIONAL STEP 7 (last room only): final SEQUENCE LOCK ----
+  if (stepCount >= 7) {
+    // Hijack: step 6 gives a "code revealed" intermediate flag instead of
+    // the door flag. The final 4-button sequence lock then gives the door.
+    const stepKey = objects.find((o) => o.id === `${roomId}_step6_key`);
+    if (stepKey) stepKey.gives = flag(6);
+
+    const seq = ["✦", "✧", "✪", "✺"];
+    objects.push({
+      id: `${roomId}_step7_mural`,
+      name: "mural",
+      prompt: `${base.muralPrompt}, ${OBJ_STYLE}`,
+      x: 200,
+      y: layout.WALL_TOP + 20,
+      width: 220,
+      height: 130,
+      collidable: false,
+      interactable: true,
+      removeBackground: true,
+      kind: "sequence_clue",
+      sequenceSymbols: seq,
+      requires: flag(6),
+      description: `A mural revealed by the previous step. ${seq.length} glyphs in a sequence.`,
+    });
+    const order = [...seq.keys()];
+    for (let s = order.length - 1; s > 0; s--) {
+      const j = randInt(rng, 0, s);
+      [order[s], order[j]] = [order[j]!, order[s]!];
+    }
+    const buttonY = layout.FLOOR_BOT - 90;
+    const startX = 90;
+    const stepX = 130;
+    for (let k = 0; k < seq.length; k++) {
+      const symbolIdx = order[k]!;
+      objects.push({
+        id: `${roomId}_step7_btn${k}`,
+        name: `btn${k}`,
+        prompt: `${base.buttonPrompt}, ${OBJ_STYLE}`,
+        x: startX + k * stepX,
+        y: buttonY,
+        width: 78,
+        height: 78,
+        collidable: false,
+        interactable: true,
+        removeBackground: true,
+        kind: "sequence_button",
+        symbol: seq[symbolIdx]!,
+        symbolIndex: symbolIdx,
+        requires: flag(6),
+        description: `A button engraved with ${seq[symbolIdx]}.`,
+      });
+    }
+    // The sequence-button engine path already calls unlockDoor() on
+    // sequence completion, so we don't need to set `gives` on each button.
+  }
+
+  // ---- DOOR ----
   objects.push(
     makeDoor(
       base,
       i,
       isLast,
       layout,
-      "The door has no handle, only a faint hum. The wall buttons must be pressed in the right order.",
+      isLast
+        ? "The final exit door. Solve every step in this room to open it."
+        : "The door to the next room. Locked until the puzzle is finished.",
     ),
   );
+
+  // ---- WALL DECO (always non-interactable, just atmosphere) ----
   objects.push(makeWallDeco(base, rng, i, layout));
-
-  // Mural — back wall, left side, shows the sequence
-  objects.push({
-    id: `${roomId}_mural`,
-    name: "mural",
-    prompt: `${base.muralPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 110, 220),
-    y: layout.WALL_TOP + 20,
-    width: 220,
-    height: 130,
-    collidable: false,
-    interactable: true,
-    removeBackground: true,
-    kind: "sequence_clue",
-    sequenceSymbols: seq,
-    puzzle: "sequence",
-    description: `A mural shows ${N} symbols glowing in a sequence.`,
-  });
-
-  // N buttons on the floor band, displayed in *shuffled* order so the sequence
-  // matters (not just left-to-right).
-  const order = Array.from({ length: N }, (_, k) => k);
-  for (let s = order.length - 1; s > 0; s--) {
-    const j = randInt(rng, 0, s);
-    [order[s], order[j]] = [order[j]!, order[s]!];
-  }
-  const buttonY = layout.FLOOR_BOT - 100;
-  const totalW = 1020;
-  const stepX = totalW / N;
-  const startX = 90;
-  for (let k = 0; k < N; k++) {
-    const symbolIdx = order[k]!;
-    objects.push({
-      id: `${roomId}_btn${k}`,
-      name: `btn${k}`,
-      prompt: `${base.buttonPrompt}, ${OBJ_STYLE}`,
-      x: Math.round(startX + k * stepX),
-      y: buttonY,
-      width: 78,
-      height: 78,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "sequence_button",
-      symbol: seq[symbolIdx]!,
-      symbolIndex: symbolIdx,
-      puzzle: "sequence",
-      description: `A button engraved with the symbol ${seq[symbolIdx]}.`,
-    });
-  }
 
   return [
     objects,
-    `Read the mural's order, then press the ${N} wall buttons in the correct sequence.`,
+    `${stepCount} steps lie between you and the next door. Click on objects to investigate them — each one unlocks the next.`,
   ];
 }
 
-// ---------------- C) LOGIC SWITCHES ----------------
-
-function buildSwitchesRoom(
-  rng: () => number,
-  base: ThemeDef,
-  i: number,
-  isLast: boolean,
-  layout: RoomLayout,
-  elements: number,
-): [RoomObject[], string] {
-  const roomId = `room${i}`;
-  const objects: RoomObject[] = [];
-  const N = Math.max(3, Math.min(6, elements));
-
-  // Target pattern: N booleans, ensure between ⌈N/3⌉ and N-1 are ON so it's
-  // never trivial (all on / all off) and never empty.
-  const minOn = Math.ceil(N / 3);
-  const maxOn = N - 1;
-  let target: boolean[] = [];
-  let triesLeft = 64;
-  do {
-    target = Array.from({ length: N }, () => rng() < 0.5);
-    triesLeft--;
-  } while (
-    triesLeft > 0 &&
-    (target.filter((b) => b).length < minOn || target.filter((b) => b).length > maxOn)
-  );
-
-  // Initial pattern — guarantee it doesn't already match
-  let initial: boolean[] = [];
-  do {
-    initial = Array.from({ length: N }, () => rng() < 0.5);
-  } while (initial.every((v, idx) => v === target[idx]));
-
-  objects.push(
-    makeDoor(
-      base,
-      i,
-      isLast,
-      layout,
-      "The door's lock is wired to the wall switches. Find the right combination.",
-    ),
-  );
-  objects.push(makeWallDeco(base, rng, i, layout));
-
-  // Switches across the back wall — distribute evenly
-  const switchY = layout.WALL_TOP + 50;
-  const totalW = 1020;
-  const stepX = totalW / N;
-  const startX = 80;
-  for (let k = 0; k < N; k++) {
-    objects.push({
-      id: `${roomId}_sw${k}`,
-      name: `sw${k}`,
-      prompt: `${base.switchPrompt}, ${OBJ_STYLE}`,
-      x: Math.round(startX + k * stepX),
-      y: switchY,
-      width: 68,
-      height: 100,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "switch",
-      symbol: String(k + 1),
-      initialOn: initial[k],
-      targetOn: target[k],
-      puzzle: "switches",
-      description: `Switch #${k + 1}. Click to toggle.`,
-    });
-  }
-
-  const cluePattern = target
-    .map((on, idx) => `${idx + 1}:${on ? "ON" : "OFF"}`)
-    .join("  ");
-  objects.push({
-    id: `${roomId}_clue`,
-    name: "clue",
-    prompt: `${base.cluePropPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 350, 470),
-    y: layout.FLOOR_BOT - 120,
-    width: 110,
-    height: 120,
-    collidable: true,
-    interactable: true,
-    removeBackground: true,
-    kind: "switch_clue",
-    symbol: cluePattern,
-    puzzle: "switches",
-    description: `A diagram. It shows which of the ${N} switches must be ON to unlock the door:\n\n${cluePattern}`,
-  });
-
-  return [
-    objects,
-    `Find the clue prop, then set the ${N} wall switches to the pattern it shows.`,
-  ];
-}
