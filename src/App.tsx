@@ -347,6 +347,12 @@ export default function App() {
               }}
             />
           )}
+          {phase === "playing" && (
+            <TouchControls
+              onMove={(dx, dy) => engineRef.current?.setTouchMove(dx, dy)}
+              onInteract={() => engineRef.current?.touchInteract()}
+            />
+          )}
           {toast && <div className="toast">{toast}</div>}
           {phase === "won" && (
             <div className="win-screen">
@@ -571,6 +577,100 @@ function Hud({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function TouchControls({
+  onMove,
+  onInteract,
+}: {
+  onMove: (dx: number, dy: number) => void;
+  onInteract: () => void;
+}) {
+  const padRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef<HTMLDivElement>(null);
+  const activeTouchId = useRef<number | null>(null);
+
+  // The d-pad is a fully analog joystick: the visible circle is the
+  // bounding region; finger position inside it maps to (dx, dy) in
+  // [-1, 1].
+  const onTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (activeTouchId.current !== null) return;
+    const t = e.changedTouches[0];
+    if (!t) return;
+    activeTouchId.current = t.identifier;
+    update(t.clientX, t.clientY);
+  };
+  const onTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i]!;
+      if (t.identifier === activeTouchId.current) {
+        update(t.clientX, t.clientY);
+        return;
+      }
+    }
+  };
+  const onTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i]!;
+      if (t.identifier === activeTouchId.current) {
+        activeTouchId.current = null;
+        if (stickRef.current)
+          stickRef.current.style.transform = "translate(-50%, -50%)";
+        onMove(0, 0);
+        return;
+      }
+    }
+  };
+  const update = (cx: number, cy: number) => {
+    const pad = padRef.current;
+    if (!pad) return;
+    const r = pad.getBoundingClientRect();
+    const ox = r.left + r.width / 2;
+    const oy = r.top + r.height / 2;
+    const radius = r.width / 2;
+    let dx = (cx - ox) / radius;
+    let dy = (cy - oy) / radius;
+    const len = Math.hypot(dx, dy);
+    if (len > 1) {
+      dx /= len;
+      dy /= len;
+    }
+    if (stickRef.current) {
+      const sx = dx * radius * 0.7;
+      const sy = dy * radius * 0.7;
+      stickRef.current.style.transform = `translate(calc(-50% + ${sx}px), calc(-50% + ${sy}px))`;
+    }
+    onMove(dx, dy);
+  };
+
+  return (
+    <div className="touch-ui">
+      <div
+        ref={padRef}
+        className="touch-dpad"
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchEnd}
+      >
+        <div ref={stickRef} className="touch-stick" />
+      </div>
+      <button
+        className="touch-action"
+        onClick={onInteract}
+        onTouchStart={(e) => {
+          e.preventDefault();
+          onInteract();
+        }}
+        aria-label="Interact"
+      >
+        E
+      </button>
     </div>
   );
 }

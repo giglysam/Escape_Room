@@ -150,6 +150,29 @@ export class GameEngine {
     return this.secondsLeft;
   }
 
+  /**
+   * Mobile/touch input — set the analog direction the player is "holding".
+   * Pass (0,0) when the touch ends. Components: dx ∈ [-1,1], dy ∈ [-1,1].
+   */
+  setTouchMove(dx: number, dy: number) {
+    if (dx === 0 && dy === 0) {
+      this.keys.delete("touchLeft");
+      this.keys.delete("touchRight");
+      this.keys.delete("touchUp");
+      this.keys.delete("touchDown");
+      return;
+    }
+    if (dx < -0.2) this.keys.add("touchLeft"); else this.keys.delete("touchLeft");
+    if (dx > 0.2) this.keys.add("touchRight"); else this.keys.delete("touchRight");
+    if (dy < -0.2) this.keys.add("touchUp"); else this.keys.delete("touchUp");
+    if (dy > 0.2) this.keys.add("touchDown"); else this.keys.delete("touchDown");
+  }
+
+  /** Mobile/touch interact button. */
+  touchInteract() {
+    this.tryInteract();
+  }
+
   getState(): GameState {
     return this.state;
   }
@@ -472,10 +495,10 @@ export class GameEngine {
   private update(dt: number) {
     let dx = 0;
     let dy = 0;
-    if (this.keys.has("ArrowLeft") || this.keys.has("a") || this.keys.has("A")) dx -= 1;
-    if (this.keys.has("ArrowRight") || this.keys.has("d") || this.keys.has("D")) dx += 1;
-    if (this.keys.has("ArrowUp") || this.keys.has("w") || this.keys.has("W")) dy -= 1;
-    if (this.keys.has("ArrowDown") || this.keys.has("s") || this.keys.has("S")) dy += 1;
+    if (this.keys.has("ArrowLeft") || this.keys.has("a") || this.keys.has("A") || this.keys.has("touchLeft")) dx -= 1;
+    if (this.keys.has("ArrowRight") || this.keys.has("d") || this.keys.has("D") || this.keys.has("touchRight")) dx += 1;
+    if (this.keys.has("ArrowUp") || this.keys.has("w") || this.keys.has("W") || this.keys.has("touchUp")) dy -= 1;
+    if (this.keys.has("ArrowDown") || this.keys.has("s") || this.keys.has("S") || this.keys.has("touchDown")) dy += 1;
 
     if (dx !== 0 && dy !== 0) {
       const inv = 1 / Math.SQRT2;
@@ -607,6 +630,7 @@ export class GameEngine {
         ctx.fill();
       }
       ctx.drawImage(p.asset.source, p.drawRect.x, p.drawRect.y, p.drawRect.w, p.drawRect.h);
+      this.tintPropToScene(p);
       this.drawObjectOverlay(p);
 
       // hover highlight
@@ -655,6 +679,41 @@ export class GameEngine {
       ctx.fillStyle = `rgba(255, 32, 50, ${alpha})`;
       ctx.fillRect(0, 0, W, H);
     }
+  }
+
+  /**
+   * Integrates an AI-generated cutout into the painted scene so it
+   * doesn't look pasted on. We tint the prop's silhouette with the
+   * room's ambient color (very subtle), then add a soft warm rim from
+   * the same direction as the room light.
+   */
+  private tintPropToScene(p: PlacedObject) {
+    const ctx = this.ctx;
+    const { drawRect: r } = p;
+    if (r.w <= 0 || r.h <= 0) return;
+    ctx.save();
+    // Clip subsequent paint to just the prop's bounding box so anything we
+    // do is masked by the prop's own alpha (source-atop only paints over
+    // existing non-transparent pixels in the scene — but the asset already
+    // has transparency, so we paint only where the prop is).
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+
+    // Ambient color wash — very low alpha multiply
+    ctx.globalCompositeOperation = "source-atop";
+    ctx.fillStyle = `${this.currentRoom.ambient_color}40`;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+
+    // Soft rim light from upper-left to bottom-right
+    const grd = ctx.createLinearGradient(r.x, r.y, r.x + r.w, r.y + r.h);
+    grd.addColorStop(0, "rgba(255,240,210,0.18)");
+    grd.addColorStop(0.5, "rgba(0,0,0,0)");
+    grd.addColorStop(1, "rgba(0,0,0,0.22)");
+    ctx.fillStyle = grd;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+
+    ctx.restore();
   }
 
   /**

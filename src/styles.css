@@ -502,6 +502,132 @@ textarea:focus {
   margin-top: 4px;
 }
 
+/* ==============================================================
+ * Touch / mobile controls
+ * ============================================================== */
+.touch-ui {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 25;
+  display: none; /* shown only on coarse-pointer / small viewports */
+}
+.touch-dpad {
+  position: absolute;
+  left: 22px;
+  bottom: 22px;
+  width: 130px;
+  height: 130px;
+  border-radius: 50%;
+  background: rgba(7, 7, 13, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(4px);
+  pointer-events: auto;
+  touch-action: none;
+}
+.touch-stick {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, rgba(124, 92, 255, 0.85), rgba(22, 225, 197, 0.85));
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+  transition: transform 0.05s linear;
+}
+.touch-action {
+  position: absolute;
+  right: 22px;
+  bottom: 38px;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #0a0a14;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  border: none;
+  pointer-events: auto;
+  box-shadow: 0 8px 24px rgba(124, 92, 255, 0.45);
+  touch-action: none;
+}
+.touch-action:active {
+  transform: scale(0.95);
+}
+
+/* Show touch controls on mobile / coarse-pointer devices */
+@media (pointer: coarse), (max-width: 720px) {
+  .touch-ui {
+    display: block;
+  }
+  .hud .panel.objective {
+    display: none; /* save vertical space on phones */
+  }
+  .hud {
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .hud .hud-col,
+  .hud .hud-col.right {
+    align-items: stretch;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .hud .panel,
+  .hud .timer-panel {
+    font-size: 12px;
+    padding: 6px 10px;
+  }
+  .hud .timer-value {
+    font-size: 18px;
+  }
+}
+
+@media (max-width: 480px) {
+  .touch-dpad {
+    width: 110px;
+    height: 110px;
+    left: 12px;
+    bottom: 12px;
+  }
+  .touch-stick {
+    width: 48px;
+    height: 48px;
+  }
+  .touch-action {
+    width: 76px;
+    height: 76px;
+    right: 12px;
+    bottom: 22px;
+    font-size: 22px;
+  }
+  .menu,
+  .briefing-block {
+    padding: 16px;
+  }
+  .menu h1 {
+    font-size: 26px;
+  }
+  .modal {
+    padding: 16px;
+  }
+}
+
+/* Allow the HUD itself to receive pointer events where needed (fix
+ * earlier bug where the bare layout was eating clicks). */
+.hud .hud-col,
+.hud .hud-col.right {
+  pointer-events: auto;
+}
+
 /* Spinner for menu/loading */
 .spinner {
   width: 14px;

@@ -161,9 +161,9 @@ const THEMES: ThemeDef[] = [
     hook: "An encrypted ping woke you in cold storage. The lab is on emergency power, the AI is still online, and only the maintenance corridors are unlocked.",
     stakes: "If you fail, the core breaches and the entire research wing — and you with it — is reduced to slag.",
     bgs: [
-      `dark futuristic AI laboratory empty interior, glowing blue server racks along the walls, holographic readouts, ${BG_STYLE}`,
-      `abandoned cyberpunk server room empty interior, red emergency lights, tangled fiber optic cables on the walls, ${BG_STYLE}`,
-      `secret AI vault empty interior, glowing lines of code projected on the back wall, ${BG_STYLE}`,
+      `dark futuristic AI laboratory wall and floor, glowing blue panel textures on the back wall, polished metal floor, holographic ambient particles, completely empty room interior, ${BG_STYLE}`,
+      `abandoned cyberpunk server room wall and floor, red emergency rim lighting, tangled fiber-optic light traces glowing on the wall, dusty metal grating floor, completely empty room interior, ${BG_STYLE}`,
+      `secret AI vault wall and floor, glowing lines of source code projected on the back wall, polished obsidian floor with subtle reflections, completely empty room interior, ${BG_STYLE}`,
     ],
     rooms: ["Control Room", "Server Vault", "Core Chamber"],
     ambient: ["#0b1424", "#1a0a14", "#0a1a18"],
@@ -202,9 +202,9 @@ const THEMES: ThemeDef[] = [
     hook: "The collector who hired you vanished an hour ago. The shop's door bolted itself the moment you stepped inside, and the mosaics on the walls have started glowing.",
     stakes: "At first light the building's ancient lock-stones fuse permanently — you stay buried with the artifacts forever.",
     bgs: [
-      `old Beirut antique shop empty interior, ottoman lamps on shelves, persian rug on the floor, dusty bookshelves on the back wall, warm cinematic light, ${BG_STYLE}`,
-      `phoenician hidden chamber empty interior, stone tablets carved into the back wall, brass mechanisms, torchlight, ${BG_STYLE}`,
-      `rooftop courtyard above old Beirut at night, moonlit, ornate carved stone wall, ${BG_STYLE}`,
+      `interior wall and floor of an old Beirut antique shop, dusty hand-painted wall plaster, faded patterned tile floor, warm amber lamplight from off-screen, completely empty room interior, ${BG_STYLE}`,
+      `interior wall and floor of a phoenician hidden chamber, hand-carved stone wall with weathered glyph textures, smooth flagstone floor, flickering torchlight from off-screen, completely empty room interior, ${BG_STYLE}`,
+      `outdoor rooftop courtyard above old Beirut at night, moonlit ornate stone wall in the back, polished marble floor, soft blue night light, completely empty courtyard, ${BG_STYLE}`,
     ],
     rooms: ["Antique Shop", "Hidden Chamber", "Rooftop Exit"],
     ambient: ["#1a1208", "#0e0a06", "#0a1018"],
@@ -243,9 +243,9 @@ const THEMES: ThemeDef[] = [
     hook: "Your cryo-pod popped open hours after the rest of the crew vanished. Comms are dead. The ship is drifting toward a star, and atmospheric pressure is dropping by the minute.",
     stakes: "Fail and the hull boils away as Sigma falls into the corona — you are vapor.",
     bgs: [
-      `interior of a derelict spaceship corridor, empty, flickering ceiling lights, floating dust, ${BG_STYLE}`,
-      `spaceship engine room empty interior, broken plasma conduits along the back wall, sparks, ${BG_STYLE}`,
-      `spaceship escape pod bay empty interior, sealed circular hatch on the back wall, warning lights, ${BG_STYLE}`,
+      `interior wall and floor of a derelict spaceship corridor, riveted metal hull walls, scuffed grated floor, flickering cool ceiling light from off-screen, floating dust particles, completely empty corridor interior, ${BG_STYLE}`,
+      `interior wall and floor of a spaceship engine room, scorched metal back wall with faint glowing fracture lines, oil-stained metal floor, hot orange rim lighting, sparks falling off-screen, completely empty room interior, ${BG_STYLE}`,
+      `interior wall and floor of a spaceship escape pod bay, smooth white hull wall, polished metal floor, pulsing red emergency rim light, completely empty bay interior, ${BG_STYLE}`,
     ],
     rooms: ["Corridor", "Engine Room", "Pod Bay"],
     ambient: ["#06101a", "#1a0c06", "#040a14"],
@@ -284,9 +284,9 @@ const THEMES: ThemeDef[] = [
     hook: "The storm chased you into a cabin you didn't choose. The door slammed itself shut and the candles lit themselves the moment you crossed the threshold.",
     stakes: "When the witch comes home she'll add you to her shelf of curiosities — labelled and preserved.",
     bgs: [
-      `interior of an old witch wooden cabin, empty, hanging herbs from the ceiling, candlelight, ${BG_STYLE}`,
-      `stone cellar empty interior under a witch cabin, runic circle on the stone floor, ${BG_STYLE}`,
-      `moonlit forest clearing at night, ${BG_STYLE}`,
+      `interior wall and floor of an old witch wooden cabin, weathered timber plank wall, dusty wooden floor, warm flickering candlelight from off-screen, drifting smoke, completely empty cabin interior, ${BG_STYLE}`,
+      `interior wall and floor of a stone cellar under a witch cabin, damp moss-covered stone wall, runic circle softly glowing on the stone floor, faint green torchlight, completely empty cellar interior, ${BG_STYLE}`,
+      `outdoor moonlit forest clearing at night, dark dense forest as the back wall, soft mossy ground as the floor, cold blue moonlight, drifting fog, completely empty clearing, ${BG_STYLE}`,
     ],
     rooms: ["Cabin", "Cellar", "Forest Gate"],
     ambient: ["#100a04", "#08040a", "#040a08"],
@@ -324,46 +324,78 @@ const THEMES: ThemeDef[] = [
  * backgrounds, props and decor are phrased in terms of the theme — never
  * hard-coded as a "lab" or "cabin".
  */
+/**
+ * Builds a deeply theme-driven `ThemeDef` from a freeform user phrase.
+ *
+ * The goal is total immersion — every prompt is phrased so the model
+ * treats `{theme}` as the *entire world* the player is inside, not just a
+ * decorative motif. Per-room sub-locations create a sense of journey
+ * (entrance → heart → exit), every prop wears the theme's vocabulary,
+ * and the background prompts are atmospheric-only (no doors, no props).
+ */
 function buildCustomTheme(theme: string): ThemeDef {
   const t = theme.trim();
-  // Three sub-locations let the playthrough feel like a journey, all inside
-  // the theme's world. Phrased as "of {theme}" so the model treats {theme}
-  // as the world, not a furniture style.
+
+  // A reusable "vibe pack" we can sprinkle into prompts to amplify
+  // immersion. The model picks up multi-sensory cues much better when
+  // we mention textures, materials, smells, and lighting.
+  const vibe = (room: "entrance" | "heart" | "exit") => {
+    const moodWords =
+      room === "entrance"
+        ? "first impression, threshold, sense of arrival, slight tension"
+        : room === "heart"
+          ? "deepest part of the place, heavy atmosphere, sense of revelation"
+          : "way out close at hand, hopeful glow, wider space, sense of release";
+    return [
+      `everything in this scene must feel like it truly belongs to the world of ${t}`,
+      `materials, textures, color palette, lighting and mood are 100% derived from ${t}`,
+      `atmospheric depth, painterly background art, cinematic concept art quality`,
+      moodWords,
+    ].join(", ");
+  };
+
   return {
     title: `Custom Run · ${t}`,
-    story: `You are trapped inside a place themed around ${t}. Solve the puzzles in each room to escape.`,
-    mission: `Reach the final exit of the world of ${t} before time runs out.`,
-    hook: `You woke up inside the world of ${t}. The way you came in has sealed itself behind you, and three locked rooms stand between you and the outside.`,
-    stakes: `If the timer hits zero, the world of ${t} collapses inward and you are lost in it forever.`,
-    rooms: [`Entrance of ${t}`, `Heart of ${t}`, `Exit of ${t}`],
+    story: `You are trapped inside the world of ${t}. Each room reveals a different facet of ${t}, and only by mastering them can you escape.`,
+    mission: `Escape the world of ${t} before time runs out.`,
+    hook: `You woke up inside the world of ${t}. Everything around you — the air, the textures, the light — is unmistakably of ${t}. The way you came in has sealed itself behind you.`,
+    stakes: `If the timer hits zero, the world of ${t} closes around you forever and you become part of it.`,
+    rooms: [`Threshold of ${t}`, `Heart of ${t}`, `Way Out of ${t}`],
     ambient: ["#0c0c18", "#180c10", "#0a1018"],
+
+    // Backgrounds describe ONLY the empty themed environment. No doors,
+    // no furniture, no props. Cutouts will be placed on top.
     bgs: [
-      `entrance area inside the world of ${t}, empty room interior with back wall and floor visible, environment fully themed around ${t}, single empty space, ${BG_STYLE}`,
-      `central chamber inside the world of ${t}, empty room interior with thematic decorations on the back wall, environment fully themed around ${t}, ${BG_STYLE}`,
-      `exit chamber inside the world of ${t}, empty room interior with a tall ornate door on the back wall, environment fully themed around ${t}, ${BG_STYLE}`,
+      `the threshold of the world of ${t}, completely empty room interior with only the back wall and floor visible, walls and floor textures fully derived from ${t}, ${vibe("entrance")}, ${BG_STYLE}`,
+      `the heart of the world of ${t}, completely empty room interior with only the back wall and floor visible, walls and floor textures fully derived from ${t}, ${vibe("heart")}, ${BG_STYLE}`,
+      `the way out of the world of ${t}, completely empty room interior with only the back wall and floor visible, walls and floor textures fully derived from ${t}, ${vibe("exit")}, ${BG_STYLE}`,
     ],
+
     doorPrompts: [
-      `tall ornate door themed around ${t}, fits the world of ${t}`,
-      `heavy decorated door themed around ${t}, fits the world of ${t}`,
-      `final exit door themed around ${t}, fits the world of ${t}, glowing edges`,
+      `tall closed door entirely made of materials and motifs from the world of ${t}, every surface, color and detail is unmistakably ${t}`,
+      `heavy decorated door entirely made of materials and motifs from the world of ${t}, ornate, every detail screams ${t}`,
+      `tall final exit door entirely made of materials and motifs from the world of ${t}, glowing edges, every detail unmistakably ${t}`,
     ],
+
     decoStyles: [
-      `small thematic object related to ${t}`,
-      `small everyday item that fits inside the world of ${t}`,
-      `small symbolic prop representing ${t}`,
-      `small lit lamp or light source styled to fit ${t}`,
-      `small piece of furniture-sized prop that belongs in ${t}`,
+      `iconic small object that immediately reads as ${t}`,
+      `small everyday prop that someone living inside the world of ${t} would own`,
+      `small symbolic relic of ${t}`,
+      `small ambient light source styled in the visual language of ${t}`,
+      `small atmospheric prop made from materials specific to ${t}`,
     ],
     itemPrompts: [
-      `small ritual item number one belonging to the world of ${t}, single small object`,
-      `small ritual item number two belonging to the world of ${t}, single small object`,
-      `small ritual item number three belonging to the world of ${t}, single small object`,
+      `small ritual offering number one, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
+      `small ritual offering number two, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
+      `small ritual offering number three, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
+      `small ritual offering number four, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
+      `small ritual offering number five, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
     ],
-    pedestalPrompt: `ornate pedestal or altar with three empty receptacles on top, themed around ${t}, fits the world of ${t}`,
-    muralPrompt: `wall mural or display showing a sequence of four glowing symbols, themed around ${t}, fits the world of ${t}`,
-    buttonPrompt: `small button with a single glowing symbol, themed around ${t}, fits the world of ${t}`,
-    switchPrompt: `wall mounted toggle switch or lever with a status indicator, themed around ${t}, fits the world of ${t}`,
-    cluePropPrompt: `small clue prop showing a diagram of switches with some highlighted, themed around ${t}, fits the world of ${t}`,
+    pedestalPrompt: `ornate pedestal or altar with empty receptacles on top, the entire pedestal is sculpted from materials and motifs of ${t}, every detail unmistakably ${t}`,
+    muralPrompt: `wall plaque showing a sequence of glowing symbols, the plaque material and the symbols themselves are pulled from the visual language of ${t}`,
+    buttonPrompt: `small push button with a single glowing symbol, button materials and the symbol art are pulled from the visual language of ${t}`,
+    switchPrompt: `wall mounted toggle switch or lever with a status indicator, the switch is sculpted from materials of ${t}, fits the world of ${t}`,
+    cluePropPrompt: `small handheld diagram showing several switch positions, the diagram surface and ink/etching style are from ${t}`,
   };
 }
 
@@ -431,97 +463,86 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
 // over the painted keypad, etc.
 // ===============================================================
 
-function locationOf(obj: RoomObject): string {
-  const cx = obj.x + obj.width / 2;
-  const cy = obj.y + obj.height / 2;
-  // y < FLOOR_TOP   → back wall (high)
-  // y between       → mid-wall / on-furniture
-  // y > FLOOR_TOP   → on the floor (front)
-  let vertical: string;
-  if (cy < FLOOR_TOP - 40) vertical = "on the back wall";
-  else if (cy < FLOOR_TOP + 40) vertical = "mounted at floor level on the back wall";
-  else vertical = "standing on the floor";
-
-  let horizontal: string;
-  if (cx < W * 0.28) horizontal = "far left";
-  else if (cx < W * 0.45) horizontal = "left of center";
-  else if (cx < W * 0.55) horizontal = "center";
-  else if (cx < W * 0.72) horizontal = "right of center";
-  else horizontal = "far right";
-
-  return `${vertical}, ${horizontal}`;
-}
-
-function describeObjectForBg(obj: RoomObject): string | null {
-  const loc = locationOf(obj);
-  switch (obj.kind) {
-    case "door":
-      return `a tall closed interior door at the ${loc.includes("far right") ? "right edge of the room" : loc}`;
-    case "exit":
-      return `a tall ornate exit door with glowing edges at the ${loc.includes("far right") ? "right edge of the room" : loc}`;
-    case "pedestal":
-      return `a waist-high pedestal/altar with empty receptacles on top, ${loc}`;
-    case "sequence_clue":
-      return `a wall mural showing a row of glowing symbols, ${loc}`;
-    case "sequence_button":
-      return `a small symbol-engraved push button, ${loc}`;
-    case "switch":
-      return `a wall-mounted toggle switch with a status indicator, ${loc}`;
-    case "switch_clue":
-      return `a small clue prop showing a switch diagram, ${loc}`;
-    case "item":
-      return `a small thematic object resting on the floor, ${loc}`;
-    case "decoration":
-      return `a small thematic decoration, ${loc}`;
-    default:
-      return null;
-  }
-}
+/**
+ * NEW POLICY (no more "two doors" bug):
+ *
+ * The background image must be a COMPLETELY EMPTY themed environment —
+ * no doors, no switches, no keypads, no pedestals, no chests, no notes,
+ * no levers, no buttons, no machinery. Every gameplay-meaningful object
+ * is generated as a separate transparent cutout and placed on top.
+ *
+ * The background's only job is atmosphere: a back wall + a floor + the
+ * theme's textures, materials, lighting, and mood. The cutout props
+ * provide the door, the keypad, etc., so we can place them precisely and
+ * the player never sees a "ghost" door painted into the background.
+ */
 
 function composeBackgroundPrompt(
-  room: RoomPlan,
+  _room: RoomPlan,
   base: ThemeDef,
   i: number,
-  numRooms: number,
+  _numRooms: number,
 ): string {
-  const isLast = i === numRooms - 1;
+  void _room;
+  void _numRooms;
 
-  // Group props by class to keep the prompt readable for the model
-  const lines: string[] = [];
-  const counts: Record<string, number> = {};
-  for (const obj of room.objects) {
-    const desc = describeObjectForBg(obj);
-    if (!desc) continue;
-    // Avoid asking for "5 switches" as 5 separate sentences — collapse
-    // adjacent same-kind props into a single grouped description.
-    counts[obj.kind] = (counts[obj.kind] ?? 0) + 1;
-    lines.push(desc);
-  }
-
-  // Use the theme's existing background as the base scene flavour, then
-  // append the explicit prop list. The model gets one rich scene prompt
-  // describing both the world and exactly what occupies it.
+  // Use the theme's prose background as the world flavour, but strip any
+  // wording that might cause the model to paint props.
   const sceneBase = base.bgs[i] ?? base.bgs[0]!;
 
-  // Clean negative directives so the AI doesn't paint extras
-  const negatives = [
+  // Strong, repeated negatives to enforce an empty room. The model
+  // weights repeated tokens, so we list the same forbidden category in
+  // multiple ways.
+  const forbidden = [
+    "completely empty room",
+    "no door",
+    "no doors",
+    "no doorway",
+    "no entrance",
+    "no exit",
+    "no gate",
+    "no portal",
+    "no window",
+    "no opening",
+    "no keypad",
+    "no panel",
+    "no buttons",
+    "no switches",
+    "no levers",
+    "no console",
+    "no terminal",
+    "no machinery",
+    "no furniture",
+    "no chest",
+    "no pedestal",
+    "no altar",
+    "no statue",
+    "no shelf",
+    "no table",
+    "no chair",
+    "no rug",
+    "no scroll",
+    "no paper",
+    "no note",
+    "no item on the floor",
     "no people",
     "no characters",
     "no creatures",
+    "no animals",
     "no text",
     "no logos",
-    "exactly one door (no extra doors)",
-    isLast ? "exactly one large exit door" : "no exit door",
+    "no symbols",
+    "no UI",
+    "no HUD",
   ].join(", ");
-
-  const propList = lines.map((l, idx) => `(${idx + 1}) ${l}`).join("; ");
 
   return [
     sceneBase,
-    `the room contains exactly the following objects in these positions: ${propList}`,
-    `viewing camera is straight-on side-scrolling 2D perspective at ${W}x${H} pixels, back wall fills the upper half, floor fills the lower half`,
-    `coherent lighting, props sit logically on surfaces (containers and decorations on the floor, switches and keypads on the wall, door fully on the wall)`,
-    negatives,
+    "completely empty atmospheric room interior, only the back wall and the floor are visible",
+    "no objects of any kind, no furniture, no doors, no windows, no props",
+    "rich theme-driven wall textures and floor textures, deep ambient lighting, painterly atmosphere, immersive mood",
+    `straight-on 2D side-scrolling camera, ${W}x${H} pixels, back wall fills the upper half, floor fills the lower half`,
+    forbidden,
   ].join(", ");
 }
 
