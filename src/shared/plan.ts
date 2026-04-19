@@ -93,9 +93,11 @@ export interface GamePlan {
   rooms: RoomPlan[];
 }
 
-const W = 1024;
-const H = 640;
-const FLOOR_TOP = 360;
+// Match Room Escape Maker's 1280x720 (16:9) standard so AI-generated
+// backgrounds line up with the chrome around the canvas.
+const W = 1280;
+const H = 720;
+const FLOOR_TOP = 410;
 
 function mulberry32(seed: number): () => number {
   let t = seed >>> 0;
@@ -561,12 +563,12 @@ interface RoomLayout {
 }
 
 function makeLayout(): RoomLayout {
-  const WALL_TOP = 110;
+  const WALL_TOP = 130;
   const WALL_BOT = FLOOR_TOP - 20;
-  const FLOOR_BOT = H - 30;
-  const doorW = 150;
-  const doorH = 290;
-  const doorX = W - doorW - 22;
+  const FLOOR_BOT = H - 40;
+  const doorW = 180;
+  const doorH = 340;
+  const doorX = W - doorW - 30;
   const doorY = WALL_TOP - 10;
   return { WALL_TOP, WALL_BOT, FLOOR_BOT, doorX, doorY, doorW, doorH };
 }
@@ -697,7 +699,7 @@ function buildCollectRoom(
   // at center-back. Slot 0 = far left, last slot = far right.
   const itemSlots: { x: number; y: number; w: number; h: number }[] = [];
   const lanes = N;
-  const laneW = 800 / lanes;
+  const laneW = 1020 / lanes;
   for (let k = 0; k < N; k++) {
     const cx = 60 + laneW * k + randInt(rng, 0, Math.max(1, Math.floor(laneW - 70)));
     // alternate between low (front floor) and high (back floor) so they read
@@ -735,7 +737,7 @@ function buildCollectRoom(
     id: `${roomId}_pedestal`,
     name: "pedestal",
     prompt: `${base.pedestalPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 440, 520),
+    x: randInt(rng, 540, 660),
     y: layout.FLOOR_BOT - 160,
     width: 160,
     height: 160,
@@ -792,7 +794,7 @@ function buildSequenceRoom(
     id: `${roomId}_mural`,
     name: "mural",
     prompt: `${base.muralPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 90, 160),
+    x: randInt(rng, 110, 220),
     y: layout.WALL_TOP + 20,
     width: 220,
     height: 130,
@@ -812,10 +814,10 @@ function buildSequenceRoom(
     const j = randInt(rng, 0, s);
     [order[s], order[j]] = [order[j]!, order[s]!];
   }
-  const buttonY = layout.FLOOR_BOT - 90;
-  const totalW = 800;
+  const buttonY = layout.FLOOR_BOT - 100;
+  const totalW = 1020;
   const stepX = totalW / N;
-  const startX = 70;
+  const startX = 90;
   for (let k = 0; k < N; k++) {
     const symbolIdx = order[k]!;
     objects.push({
@@ -890,9 +892,9 @@ function buildSwitchesRoom(
 
   // Switches across the back wall — distribute evenly
   const switchY = layout.WALL_TOP + 50;
-  const totalW = 800;
+  const totalW = 1020;
   const stepX = totalW / N;
-  const startX = 60;
+  const startX = 80;
   for (let k = 0; k < N; k++) {
     objects.push({
       id: `${roomId}_sw${k}`,
@@ -921,7 +923,7 @@ function buildSwitchesRoom(
     id: `${roomId}_clue`,
     name: "clue",
     prompt: `${base.cluePropPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 290, 380),
+    x: randInt(rng, 350, 470),
     y: layout.FLOOR_BOT - 120,
     width: 110,
     height: 120,

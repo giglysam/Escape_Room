@@ -240,26 +240,143 @@ textarea:focus {
   min-height: 0;
   padding: 0 12px;
 }
-.canvas-wrap {
+.canvas-column {
   flex: 1 1 auto;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   min-width: 0;
   min-height: 0;
 }
-.game-canvas {
-  background: #000;
+.canvas-frame {
+  /* REM-style wall + floor split frame behind the canvas. The wall and
+   * floor colours come from the active room's ambient palette. */
+  --wall-color: #1a1a2c;
+  --floor-color: #06060c;
+  position: relative;
   border-radius: 14px;
+  overflow: hidden;
   box-shadow: var(--shadow);
+  width: 100%;
+  max-height: calc(100vh - var(--hud-h) - 100px);
+  max-width: calc((100vh - var(--hud-h) - 100px) * (1280 / 720));
+  aspect-ratio: 1280 / 720;
+  background: var(--wall-color);
+}
+.canvas-bg-wall {
+  position: absolute;
+  inset: 0 0 38% 0;
+  background-color: var(--wall-color);
+  pointer-events: none;
+}
+.canvas-bg-floor {
+  position: absolute;
+  inset: 62% 0 0 0;
+  background-color: var(--floor-color);
+  pointer-events: none;
+}
+.game-canvas {
+  position: absolute;
+  inset: 0;
+  background: transparent;
   cursor: pointer;
   image-rendering: auto;
   display: block;
   width: 100%;
-  height: auto;
-  max-height: 100%;
-  max-width: calc((100vh - var(--hud-h) - 32px) * (1024 / 640));
-  aspect-ratio: 1024 / 640;
+  height: 100%;
+}
+
+/* ==============================================================
+ * Bottom nav bar (Room Escape Maker `#game-controls`)
+ * ============================================================== */
+.game-nav {
+  width: 100%;
+  max-width: calc((100vh - var(--hud-h) - 100px) * (1280 / 720));
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: linear-gradient(180deg, rgba(7, 7, 13, 0.7), rgba(7, 7, 13, 0.85));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  font-family: "Oswald", "Inter", system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+.nav-slider {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 8px;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+.nav-arrow {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #14141f 0%, #0c0c14 100%);
+  color: var(--fg);
+  font-family: inherit;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 10px;
+  min-width: 88px;
+  cursor: pointer;
+  transition:
+    transform 0.08s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.nav-arrow:hover:not(.disabled):not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(124, 92, 255, 0.6);
+  box-shadow: 0 4px 14px rgba(124, 92, 255, 0.3);
+}
+.nav-arrow.disabled,
+.nav-arrow:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.nav-arrow-icon {
+  font-size: 18px;
+  line-height: 1;
+  color: var(--accent-2);
+}
+.nav-arrow-legend {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+.nav-view-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.nav-view-number b {
+  margin-left: 6px;
+  font-size: 16px;
+  letter-spacing: 0;
+  font-weight: 800;
+  color: var(--accent-2);
 }
 
 /* ==============================================================
@@ -441,16 +558,20 @@ textarea:focus {
 .inv-side-item {
   width: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: 10px;
+  gap: 4px;
+  padding: 8px 6px;
+  border-radius: 8px;
   background: linear-gradient(180deg, #14141f 0%, #0c0c14 100%);
   border: 1px solid var(--border);
   color: var(--fg);
-  text-align: left;
-  font-weight: 600;
-  font-size: 12px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-family: "Oswald", "Inter", system-ui, sans-serif;
   transition:
     transform 0.08s ease,
     border-color 0.15s ease,
@@ -458,23 +579,25 @@ textarea:focus {
     background 0.15s ease;
 }
 .inv-side-item:hover {
-  transform: translateX(-2px);
+  transform: translateY(-2px);
   border-color: rgba(124, 92, 255, 0.9);
   box-shadow: 0 6px 16px rgba(124, 92, 255, 0.35);
   background: linear-gradient(180deg, rgba(124, 92, 255, 0.18) 0%, #11111c 100%);
 }
 .inv-side-icon {
-  font-size: 24px;
+  font-size: 30px;
   line-height: 1;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
-  flex: 0 0 28px;
-  text-align: center;
 }
 .inv-side-label {
-  flex: 1 1 auto;
+  width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--muted);
+}
+.inv-side-item:hover .inv-side-label {
+  color: var(--fg);
 }
 
 /* ==============================================================
@@ -762,6 +885,25 @@ textarea:focus {
     gap: 8px;
     padding: 0 8px;
   }
+  .canvas-frame {
+    max-height: none;
+    max-width: 100%;
+  }
+  .game-nav {
+    max-width: 100%;
+    font-size: 9px;
+  }
+  .nav-arrow {
+    min-width: 60px;
+    padding: 4px 8px;
+  }
+  .nav-view-number {
+    padding: 0 8px;
+    font-size: 10px;
+  }
+  .nav-view-number b {
+    font-size: 14px;
+  }
   .inv-side {
     flex: 0 0 auto;
     width: 100%;
@@ -780,7 +922,8 @@ textarea:focus {
   }
   .inv-side-item {
     flex: 0 0 auto;
-    padding: 6px 10px;
+    width: 84px;
+    padding: 6px 8px;
   }
   .inv-side-empty {
     padding: 6px;
