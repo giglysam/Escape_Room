@@ -29,6 +29,7 @@ export default function App() {
   const [currentRoomId, setCurrentRoomId] = useState<string>("");
   const [secondsLeft, setSecondsLeft] = useState<number>(0);
   const [muted, setMutedState] = useState<boolean>(isMuted());
+  const [hover, setHover] = useState<{ label: string; x: number; y: number } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
@@ -119,6 +120,10 @@ export default function App() {
         setPhase("lost");
       },
       onTimeTick: (s) => setSecondsLeft(s),
+      onHover: (info) => {
+        if (info) setHover({ label: info.label, x: info.clientX, y: info.clientY });
+        else setHover(null);
+      },
     });
     engineRef.current = engine;
     setCurrentRoomId(engine.getCurrentRoom().id);
@@ -269,16 +274,6 @@ export default function App() {
 
       {(phase === "playing" || phase === "won" || phase === "lost") && plan && assets && (
         <div className="game-wrap">
-          <canvas
-            ref={canvasRef}
-            className="game-canvas"
-            width={PLAN_CANVAS.width}
-            height={PLAN_CANVAS.height}
-            style={{
-              aspectRatio: `${PLAN_CANVAS.width} / ${PLAN_CANVAS.height}`,
-              width: "min(100%, 1280px)",
-            }}
-          />
           <Hud
             plan={plan}
             currentRoomId={currentRoomId}
@@ -298,30 +293,43 @@ export default function App() {
               setToast(null);
             }}
           />
-          <InventoryBar
-            inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
-            invRev={inventoryRev}
-            onClick={(itemId) => {
-              const desc = describeItem(itemId, plan);
-              setModal({
-                kind: "info",
-                object: {
-                  id: `inv_${itemId}`,
-                  name: itemId,
-                  prompt: "",
-                  x: 0,
-                  y: 0,
-                  width: 0,
-                  height: 0,
-                  collidable: false,
-                  interactable: false,
-                  removeBackground: false,
-                  kind: "decoration",
-                } as RoomObject,
-                message: desc,
-              });
-            }}
-          />
+          <div className="game-stage">
+            <div className="canvas-wrap">
+              <canvas
+                ref={canvasRef}
+                className="game-canvas"
+                width={PLAN_CANVAS.width}
+                height={PLAN_CANVAS.height}
+              />
+            </div>
+            <InventorySidebar
+              inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
+              invRev={inventoryRev}
+              onClick={(itemId) => {
+                const desc = describeItem(itemId, plan);
+                setModal({
+                  kind: "info",
+                  object: {
+                    id: `inv_${itemId}`,
+                    name: itemId,
+                    prompt: "",
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                    collidable: false,
+                    interactable: false,
+                    removeBackground: false,
+                    kind: "decoration",
+                  } as RoomObject,
+                  message: desc,
+                });
+              }}
+            />
+          </div>
+          {hover && phase === "playing" && (
+            <HoverTooltip label={hover.label} x={hover.x} y={hover.y} />
+          )}
           {modal && (
             <ModalView
               modal={modal}
@@ -550,46 +558,65 @@ function Hud({
 }
 
 /**
- * CSScape-style fixed bottom inventory bar. Always-visible row of slot
- * tiles. Empty slots show as faint placeholders. Tap a held item to
- * inspect it.
+ * Room Escape Maker-style right-side vertical inventory sidebar.
+ * Shows an "Items" header and a stacked list of held items. Each item is
+ * a card-style button with an icon + label. Empty state shows a quiet
+ * placeholder.
  */
-function InventoryBar({
+function InventorySidebar({
   inventory,
   invRev,
   onClick,
-  capacity = 8,
 }: {
   inventory: string[];
   invRev: number;
   onClick: (itemId: string) => void;
-  capacity?: number;
 }) {
   void invRev;
-  const slots = Array.from({ length: Math.max(capacity, inventory.length) }, (_, i) => inventory[i] ?? null);
   return (
-    <div className="inv-bar" role="toolbar" aria-label="Inventory">
-      {slots.map((id, i) => (
-        <button
-          key={id ?? `empty-${i}`}
-          className={`inv-slot ${id ? "filled" : "empty"}`}
-          onClick={() => id && onClick(id)}
-          disabled={!id}
-          title={id ? prettyItemName(id) : "Empty slot"}
-          aria-label={id ? prettyItemName(id) : "Empty slot"}
-        >
-          {id ? (
-            <>
-              <div className="inv-slot-icon" aria-hidden="true">
+    <aside className="inv-side" aria-label="Inventory">
+      <h2 className="inv-side-title">
+        Items
+        <span className="inv-side-count">{inventory.length}</span>
+      </h2>
+      <ul className="inv-side-list">
+        {inventory.length === 0 && (
+          <li className="inv-side-empty">No items collected yet.</li>
+        )}
+        {inventory.map((id) => (
+          <li key={id}>
+            <button
+              className="inv-side-item"
+              onClick={() => onClick(id)}
+              aria-label={prettyItemName(id)}
+            >
+              <span className="inv-side-icon" aria-hidden="true">
                 {itemEmoji(id)}
-              </div>
-              <div className="inv-slot-label">{prettyItemName(id)}</div>
-            </>
-          ) : (
-            <div className="inv-slot-empty-dot" />
-          )}
-        </button>
-      ))}
+              </span>
+              <span className="inv-side-label">{prettyItemName(id)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </aside>
+  );
+}
+
+/**
+ * Cursor-following tooltip showing the hovered prop's name.
+ * Mirrors REM's `#tooltip-container` UX: the label gently floats above
+ * the cursor and disappears as soon as you leave a hotspot.
+ */
+function HoverTooltip({ label, x, y }: { label: string; x: number; y: number }) {
+  return (
+    <div
+      className="hover-tooltip"
+      style={{
+        left: x,
+        top: y,
+      }}
+    >
+      {label}
     </div>
   );
 }

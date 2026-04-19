@@ -33,6 +33,19 @@ export interface GameCallbacks {
   onWin: () => void;
   onLose: () => void;
   onTimeTick: (secondsLeft: number) => void;
+  /**
+   * Fires whenever the prop under the cursor changes. `null` means the
+   * cursor isn't over any interactable. `clientX`/`clientY` are the raw
+   * page-space coords of the pointer so the React tooltip can follow.
+   */
+  onHover: (
+    info: {
+      label: string;
+      kind: RoomObject["kind"];
+      clientX: number;
+      clientY: number;
+    } | null,
+  ) => void;
 }
 
 export interface GameState {
@@ -312,13 +325,22 @@ export class GameEngine {
   private bindInput() {
     this.canvas.addEventListener("mousemove", this.onMouseMove);
     this.canvas.addEventListener("mousedown", this.onMouseDown);
+    this.canvas.addEventListener("mouseleave", this.onMouseLeave);
     this.canvas.addEventListener("touchstart", this.onTouchStart, { passive: false });
   }
   private unbindInput() {
     this.canvas.removeEventListener("mousemove", this.onMouseMove);
     this.canvas.removeEventListener("mousedown", this.onMouseDown);
+    this.canvas.removeEventListener("mouseleave", this.onMouseLeave);
     this.canvas.removeEventListener("touchstart", this.onTouchStart);
   }
+
+  private onMouseLeave = () => {
+    if (this.hoveredObject) {
+      this.hoveredObject = null;
+      this.cb.onHover(null);
+    }
+  };
 
   private getCanvasPoint(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
@@ -329,8 +351,21 @@ export class GameEngine {
 
   private onMouseMove = (e: MouseEvent) => {
     const p = this.getCanvasPoint(e.clientX, e.clientY);
-    this.hoveredObject = this.findObjectAt(p.x, p.y);
-    this.canvas.style.cursor = this.hoveredObject?.obj.interactable ? "pointer" : "default";
+    const next = this.findObjectAt(p.x, p.y);
+    const prev = this.hoveredObject;
+    this.hoveredObject = next;
+    this.canvas.style.cursor = next?.obj.interactable ? "pointer" : "default";
+
+    if (next?.obj.interactable) {
+      this.cb.onHover({
+        label: labelFor(next.obj),
+        kind: next.obj.kind,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      });
+    } else if (prev?.obj.interactable) {
+      this.cb.onHover(null);
+    }
   };
 
   private onMouseDown = (e: MouseEvent) => {
@@ -613,5 +648,30 @@ export class GameEngine {
     ctx.arcTo(x, y + h, x, y, r);
     ctx.arcTo(x, y, x + w, y, r);
     ctx.closePath();
+  }
+}
+
+function labelFor(obj: RoomObject): string {
+  switch (obj.kind) {
+    case "door":
+      return "Door";
+    case "exit":
+      return "Exit door";
+    case "item":
+      return "Pick up";
+    case "pedestal":
+      return "Pedestal";
+    case "sequence_clue":
+      return "Wall mural";
+    case "sequence_button":
+      return `Button ${obj.symbol ?? ""}`.trim();
+    case "switch":
+      return `Switch ${obj.symbol ?? ""}`.trim();
+    case "switch_clue":
+      return "Diagram";
+    case "decoration":
+      return "Inspect";
+    default:
+      return obj.name;
   }
 }
