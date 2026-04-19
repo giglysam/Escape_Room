@@ -370,7 +370,13 @@ function buildCustomTheme(theme: string): ThemeDef {
 export const PLAN_CANVAS = { width: W, height: H, floorTop: FLOOR_TOP };
 
 const OBJ_STYLE =
-  "single small object only, centered subject on a pure plain solid white background, isolated, no shadow, product photo style, no environment, no room, no building, no house, no cabin, no architecture, no people, no creatures, no text, ultra detailed, sharp focus";
+  "single small object only, centered subject, " +
+  "background is a pure flat solid white #ffffff color filling the entire image, " +
+  "no gradient, no texture, no pattern, no scene, no surface, no shadow, no reflection, " +
+  "isolated cutout product photo style, " +
+  "no environment, no room, no building, no house, no cabin, no architecture, " +
+  "no people, no creatures, no text, no logos, " +
+  "ultra detailed, sharp focus, even lighting";
 
 export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
   const seed = req.seed ?? Math.floor(Math.random() * 1e9);
@@ -392,7 +398,11 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
   const rooms: RoomPlan[] = [];
   for (let i = 0; i < numRooms; i++) {
     const arch = ARCHETYPES[(startArch + i) % ARCHETYPES.length]!;
-    rooms.push(buildRoom(rng, base, i, numRooms, arch));
+    const room = buildRoom(rng, base, i, numRooms, arch);
+    // Rewrite the room's background prompt so the AI is told EXACTLY where
+    // every prop sits — no more "two doors" / "cup on the floor" mismatches.
+    room.background_prompt = composeBackgroundPrompt(room, base, i, numRooms);
+    rooms.push(room);
   }
 
   // Difficulty → time budget. Easier runs give more thinking time. The
@@ -411,6 +421,108 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
     timeLimitSec: baseSeconds,
     rooms,
   };
+}
+
+// ===============================================================
+// Background-prompt composer — encodes object positions into the
+// background prompt so the AI paints them in the right places. The
+// in-game cutouts then sit ON TOP of what the AI painted, so the door
+// hotspot covers the painted door (no "two doors"), the keypad sits
+// over the painted keypad, etc.
+// ===============================================================
+
+function locationOf(obj: RoomObject): string {
+  const cx = obj.x + obj.width / 2;
+  const cy = obj.y + obj.height / 2;
+  // y < FLOOR_TOP   → back wall (high)
+  // y between       → mid-wall / on-furniture
+  // y > FLOOR_TOP   → on the floor (front)
+  let vertical: string;
+  if (cy < FLOOR_TOP - 40) vertical = "on the back wall";
+  else if (cy < FLOOR_TOP + 40) vertical = "mounted at floor level on the back wall";
+  else vertical = "standing on the floor";
+
+  let horizontal: string;
+  if (cx < W * 0.28) horizontal = "far left";
+  else if (cx < W * 0.45) horizontal = "left of center";
+  else if (cx < W * 0.55) horizontal = "center";
+  else if (cx < W * 0.72) horizontal = "right of center";
+  else horizontal = "far right";
+
+  return `${vertical}, ${horizontal}`;
+}
+
+function describeObjectForBg(obj: RoomObject): string | null {
+  const loc = locationOf(obj);
+  switch (obj.kind) {
+    case "door":
+      return `a tall closed interior door at the ${loc.includes("far right") ? "right edge of the room" : loc}`;
+    case "exit":
+      return `a tall ornate exit door with glowing edges at the ${loc.includes("far right") ? "right edge of the room" : loc}`;
+    case "pedestal":
+      return `a waist-high pedestal/altar with empty receptacles on top, ${loc}`;
+    case "sequence_clue":
+      return `a wall mural showing a row of glowing symbols, ${loc}`;
+    case "sequence_button":
+      return `a small symbol-engraved push button, ${loc}`;
+    case "switch":
+      return `a wall-mounted toggle switch with a status indicator, ${loc}`;
+    case "switch_clue":
+      return `a small clue prop showing a switch diagram, ${loc}`;
+    case "item":
+      return `a small thematic object resting on the floor, ${loc}`;
+    case "decoration":
+      return `a small thematic decoration, ${loc}`;
+    default:
+      return null;
+  }
+}
+
+function composeBackgroundPrompt(
+  room: RoomPlan,
+  base: ThemeDef,
+  i: number,
+  numRooms: number,
+): string {
+  const isLast = i === numRooms - 1;
+
+  // Group props by class to keep the prompt readable for the model
+  const lines: string[] = [];
+  const counts: Record<string, number> = {};
+  for (const obj of room.objects) {
+    const desc = describeObjectForBg(obj);
+    if (!desc) continue;
+    // Avoid asking for "5 switches" as 5 separate sentences — collapse
+    // adjacent same-kind props into a single grouped description.
+    counts[obj.kind] = (counts[obj.kind] ?? 0) + 1;
+    lines.push(desc);
+  }
+
+  // Use the theme's existing background as the base scene flavour, then
+  // append the explicit prop list. The model gets one rich scene prompt
+  // describing both the world and exactly what occupies it.
+  const sceneBase = base.bgs[i] ?? base.bgs[0]!;
+
+  // Clean negative directives so the AI doesn't paint extras
+  const negatives = [
+    "no people",
+    "no characters",
+    "no creatures",
+    "no text",
+    "no logos",
+    "exactly one door (no extra doors)",
+    isLast ? "exactly one large exit door" : "no exit door",
+  ].join(", ");
+
+  const propList = lines.map((l, idx) => `(${idx + 1}) ${l}`).join("; ");
+
+  return [
+    sceneBase,
+    `the room contains exactly the following objects in these positions: ${propList}`,
+    `viewing camera is straight-on side-scrolling 2D perspective at ${W}x${H} pixels, back wall fills the upper half, floor fills the lower half`,
+    `coherent lighting, props sit logically on surfaces (containers and decorations on the floor, switches and keypads on the wall, door fully on the wall)`,
+    negatives,
+  ].join(", ");
 }
 
 // ===============================================================
