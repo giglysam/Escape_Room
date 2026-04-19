@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { generateProceduralPlan, PLAN_CANVAS, type GamePlan, type RoomObject, type RoomPlan } from "./shared/plan";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { generateProceduralPlan, PLAN_CANVAS, type GamePlan, type RoomObject } from "./shared/plan";
 import { loadPlanAssets, type AssetSet, type ProgressEvent } from "./engine/assetManager";
 import { GameEngine, type InteractionRequest } from "./engine/game";
+import { isMuted, playWin, setMuted } from "./engine/audio";
 
-type Phase = "menu" | "loading" | "playing" | "won";
+type Phase = "menu" | "loading" | "briefing" | "playing" | "won" | "lost";
 
-interface ModalState {
-  kind: "info" | "keypad" | "riddle" | "container" | "door";
-  object: RoomObject;
-  message?: string;
-}
+type ModalState =
+  | { kind: "info"; object: RoomObject; message?: string }
+  | { kind: "sequence_clue"; object: RoomObject }
+  | { kind: "switch_clue"; object: RoomObject }
+  | { kind: "pedestal"; object: RoomObject };
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>("menu");
@@ -26,6 +27,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [inventoryRev, setInventoryRev] = useState(0);
   const [currentRoomId, setCurrentRoomId] = useState<string>("");
+  const [secondsLeft, setSecondsLeft] = useState<number>(0);
+  const [muted, setMutedState] = useState<boolean>(isMuted());
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
@@ -82,7 +85,9 @@ export default function App() {
           });
         });
         setAssets(set);
-        setPhase("playing");
+        // After assets are ready, show the mission briefing — only when the
+        // player accepts do we start the actual game (and the timer).
+        setPhase("briefing");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setProgress((p) => ({
@@ -107,8 +112,13 @@ export default function App() {
         showToast(room.intro);
       },
       onWin: () => {
+        playWin();
         setPhase("won");
       },
+      onLose: () => {
+        setPhase("lost");
+      },
+      onTimeTick: (s) => setSecondsLeft(s),
     });
     engineRef.current = engine;
     setCurrentRoomId(engine.getCurrentRoom().id);
@@ -123,90 +133,107 @@ export default function App() {
   }, [phase, plan, assets]);
 
   // ---------------- interaction handler ----------------
-  const handleInteract = useCallback((req: InteractionRequest) => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    const obj = req.object;
+  const handleInteract = useCallback(
+    (req: InteractionRequest) => {
+      const engine = engineRef.current;
+      if (!engine) return;
+      const obj = req.object;
 
-    switch (obj.kind) {
-      case "note": {
-        setModal({ kind: "riddle", object: obj });
-        return;
-      }
-      case "keypad": {
-        setModal({ kind: "keypad", object: obj });
-        return;
-      }
-      case "container": {
-        const required = obj.requires;
-        if (required && !engine.hasFlag(required) && !engine.hasItem(required)) {
-          showToast("It won't budge. You need to figure something out first.");
+      switch (obj.kind) {
+        // ---------- A) COLLECT & COMBINE ----------
+        case "item": {
+          if (!obj.gives) return;
+          if (!engine.hasItem(obj.gives)) {
+            engine.collectItem(obj.gives);
+            setInventoryRev((n) => n + 1);
+            showToast(`Picked up an offering. (${engine.getState().inventory.size} carried)`);
+          }
           return;
         }
-        if (obj.gives && !engine.hasItem(obj.gives)) {
-          engine.giveItem(obj.gives);
-          setInventoryRev((n) => n + 1);
-          const isCode = obj.gives.startsWith("code_");
-          const message = isCode
-            ? `Inside, you find a slip of paper. It reads:\n\n  ${getRoomCodeFromGive(obj, req.room)}\n\nThe keypad calls.`
-            : `You take the ${obj.gives}.`;
-          setModal({ kind: "info", object: obj, message });
-        } else {
-          showToast("Empty.");
-        }
-        return;
-      }
-      case "door":
-      case "exit": {
-        const need = obj.requires;
-        if (need && !engine.hasItem(need)) {
-          showToast("Locked. You need a key.");
+        case "pedestal": {
+          setModal({ kind: "pedestal", object: obj });
           return;
         }
-        // unlocked!
-        if (obj.kind === "exit") {
-          setModal({
-            kind: "info",
-            object: obj,
-            message: "You slide the key in. The exit door clunks open. Freedom.",
-          });
-          // Delay the win until they dismiss
-          setTimeout(() => engine.advanceRoom(), 0);
-        } else {
-          setModal({
-            kind: "info",
-            object: obj,
-            message: "The door unlocks. You step through into the next room.",
-          });
-          setTimeout(() => engine.advanceRoom(), 0);
-        }
-        return;
-      }
-      case "key":
-      case "tool": {
-        if (obj.gives) {
-          engine.giveItem(obj.gives);
-          setInventoryRev((n) => n + 1);
-          showToast(`Picked up: ${obj.gives}`);
-        }
-        return;
-      }
-      default: {
-        if (obj.description) {
-          setModal({ kind: "info", object: obj, message: obj.description });
-        } else {
-          showToast("Nothing interesting.");
-        }
-      }
-    }
-  }, [showToast]);
 
-  // helper — find the keypad code in the same room as the container
-  const getRoomCodeFromGive = (containerObj: RoomObject, room: RoomPlan): string => {
-    void containerObj;
-    const keypad = room.objects.find((o) => o.kind === "keypad");
-    return keypad?.solution ?? "????";
-  };
+        // ---------- B) SYMBOL SEQUENCE ----------
+        case "sequence_clue": {
+          setModal({ kind: "sequence_clue", object: obj });
+          return;
+        }
+        case "sequence_button": {
+          const r = engine.pressSequenceButton(obj);
+          if (r === "complete") {
+            setModal({
+              kind: "info",
+              object: obj,
+              message:
+                "The sequence locks in. A heavy thunk echoes — the door is unlocked. Walk to it and open.",
+            });
+          } else if (r === "correct") {
+            const progress = engine.getSequenceProgress();
+            const total = req.room.objects.filter((o) => o.kind === "sequence_button").length;
+            showToast(`Correct. ${progress}/${total}`);
+          } else {
+            showToast("Wrong order. The sequence resets.");
+          }
+          return;
+        }
+
+        // ---------- C) LOGIC SWITCHES ----------
+        case "switch": {
+          const next = engine.toggleSwitch(obj.id);
+          setInventoryRev((n) => n + 1);
+          showToast(`Switch ${obj.symbol ?? ""} → ${next ? "ON" : "OFF"}`);
+          if (engine.isDoorUnlocked()) {
+            setTimeout(
+              () =>
+                showToast("You hear the door's lock disengage. Open it."),
+              350,
+            );
+          }
+          return;
+        }
+        case "switch_clue": {
+          setModal({ kind: "switch_clue", object: obj });
+          return;
+        }
+
+        // ---------- DOOR / EXIT ----------
+        case "door":
+        case "exit": {
+          if (!engine.isDoorUnlocked()) {
+            showToast("Locked. Solve this room's puzzle first.");
+            return;
+          }
+          if (obj.kind === "exit") {
+            setModal({
+              kind: "info",
+              object: obj,
+              message: "The exit door swings open. Freedom.",
+            });
+            setTimeout(() => engine.advanceRoom(), 0);
+          } else {
+            setModal({
+              kind: "info",
+              object: obj,
+              message: "The door unlocks. You step through into the next room.",
+            });
+            setTimeout(() => engine.advanceRoom(), 0);
+          }
+          return;
+        }
+
+        default: {
+          if (obj.description) {
+            setModal({ kind: "info", object: obj, message: obj.description });
+          } else {
+            showToast("Nothing interesting.");
+          }
+        }
+      }
+    },
+    [showToast],
+  );
 
   // ---------------- render ----------------
   return (
@@ -228,7 +255,19 @@ export default function App() {
 
       {phase === "loading" && <LoadingScreen progress={progress} />}
 
-      {(phase === "playing" || phase === "won") && plan && assets && (
+      {phase === "briefing" && plan && (
+        <BriefingScreen
+          plan={plan}
+          onBegin={() => setPhase("playing")}
+          onCancel={() => {
+            setPhase("menu");
+            setPlan(null);
+            setAssets(null);
+          }}
+        />
+      )}
+
+      {(phase === "playing" || phase === "won" || phase === "lost") && plan && assets && (
         <div className="game-wrap">
           <canvas
             ref={canvasRef}
@@ -245,48 +284,65 @@ export default function App() {
             currentRoomId={currentRoomId}
             inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
             invRev={inventoryRev}
+            secondsLeft={secondsLeft}
+            muted={muted}
+            onToggleMute={() => {
+              const next = !muted;
+              setMuted(next);
+              setMutedState(next);
+            }}
             onQuit={() => {
               engineRef.current?.stop();
               setPhase("menu");
               setPlan(null);
               setAssets(null);
+              setModal(null);
+              setToast(null);
+            }}
+            onInventoryClick={(itemId) => {
+              const desc = describeItem(itemId, plan);
+              setModal({
+                kind: "info",
+                object: {
+                  id: `inv_${itemId}`,
+                  name: itemId,
+                  prompt: "",
+                  x: 0,
+                  y: 0,
+                  width: 0,
+                  height: 0,
+                  collidable: false,
+                  interactable: false,
+                  removeBackground: false,
+                  kind: "decoration",
+                } as RoomObject,
+                message: desc,
+              });
             }}
           />
           {modal && (
             <ModalView
               modal={modal}
+              inventory={
+                engineRef.current ? Array.from(engineRef.current.getState().inventory) : []
+              }
               onClose={() => setModal(null)}
-              onSolveRiddle={(noteObj, ok) => {
+              onDeposit={(pedestalObj, itemId) => {
                 const engine = engineRef.current;
                 if (!engine) return;
-                if (ok) {
-                  engine.solveRiddle(noteObj.id);
-                  setInventoryRev((n) => n + 1);
+                const r = engine.depositOnPedestal(pedestalObj, itemId);
+                setInventoryRev((n) => n + 1);
+                if (r === "complete") {
                   setModal({
                     kind: "info",
-                    object: noteObj,
+                    object: pedestalObj,
                     message:
-                      "A panel slides aside revealing a hidden compartment in this room — try the container nearby.",
+                      "All offerings accepted. The pedestal hums and the door's lock disengages.",
                   });
+                } else if (r === "accepted") {
+                  showToast("Accepted.");
                 } else {
-                  showToast(noteObj.hint ?? "That's not it.");
-                }
-              }}
-              onSubmitKeypad={(kpObj, code) => {
-                const engine = engineRef.current;
-                if (!engine) return;
-                if (code === kpObj.solution) {
-                  if (kpObj.gives) {
-                    engine.giveItem(kpObj.gives);
-                    setInventoryRev((n) => n + 1);
-                  }
-                  setModal({
-                    kind: "info",
-                    object: kpObj,
-                    message: "Click! A key card pops out of the slot. Picked up!",
-                  });
-                } else {
-                  showToast(kpObj.hint ?? "Wrong code.");
+                  showToast("That doesn't fit here.");
                 }
               }}
             />
@@ -296,16 +352,40 @@ export default function App() {
             <div className="win-screen">
               <div className="card">
                 <h1>You escaped.</h1>
-                <p>{plan.title}</p>
+                <p style={{ marginBottom: 6 }}>{plan.title}</p>
+                <p style={{ color: "var(--ok)", marginBottom: 24 }}>
+                  Time remaining: {formatTime(secondsLeft)}
+                </p>
                 <button
                   className="primary"
                   onClick={() => {
+                    engineRef.current?.stop();
                     setPhase("menu");
                     setPlan(null);
                     setAssets(null);
                   }}
                 >
                   New Game
+                </button>
+              </div>
+            </div>
+          )}
+          {phase === "lost" && (
+            <div className="win-screen lost">
+              <div className="card">
+                <h1 className="lost-title">Time's up.</h1>
+                <p style={{ marginBottom: 6 }}>{plan.title}</p>
+                <p style={{ color: "var(--danger)", marginBottom: 24 }}>{plan.stakes}</p>
+                <button
+                  className="primary"
+                  onClick={() => {
+                    engineRef.current?.stop();
+                    setPhase("menu");
+                    setPlan(null);
+                    setAssets(null);
+                  }}
+                >
+                  Try again
                 </button>
               </div>
             </div>
@@ -427,60 +507,146 @@ function Hud({
   currentRoomId,
   inventory,
   invRev,
+  secondsLeft,
+  muted,
   onQuit,
+  onInventoryClick,
+  onToggleMute,
 }: {
   plan: GamePlan;
   currentRoomId: string;
   inventory: string[];
   invRev: number;
+  secondsLeft: number;
+  muted: boolean;
   onQuit: () => void;
+  onInventoryClick: (itemId: string) => void;
+  onToggleMute: () => void;
 }) {
   const room = plan.rooms.find((r) => r.id === currentRoomId);
-  // touch invRev so React rerenders when inventory mutates in-place
   void invRev;
+  const lowTime = secondsLeft <= 60;
   return (
     <div className="hud">
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div className="hud-col">
         <div className="panel title">{plan.title}</div>
         <div className="panel">
           {room?.name ?? ""} · Room {(plan.rooms.findIndex((r) => r.id === currentRoomId) + 1)}/
           {plan.rooms.length}
         </div>
+        <div className="panel objective" title="Mission">
+          <span className="obj-label">MISSION</span>
+          <span>{plan.mission}</span>
+        </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+      <div className="hud-col right">
+        <div className={`panel timer-panel ${lowTime ? "low" : ""}`}>
+          <span className="obj-label">TIME LEFT</span>
+          <span className="timer-value">{formatTime(secondsLeft)}</span>
+        </div>
         <div className="panel">
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>INVENTORY</div>
           <div className="inventory">
-            {inventory.length === 0 && <span style={{ color: "var(--muted)", fontSize: 12 }}>empty</span>}
+            {inventory.length === 0 && (
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>empty</span>
+            )}
             {inventory.map((it) => (
-              <span key={it} className="inv-chip">
+              <button
+                key={it}
+                className="inv-chip"
+                onClick={() => onInventoryClick(it)}
+                title="Click to inspect"
+              >
                 {prettyItemName(it)}
-              </span>
+              </button>
             ))}
           </div>
         </div>
-        <button onClick={onQuit}>Quit to menu</button>
+        <div style={{ display: "flex", gap: 6, pointerEvents: "auto" }}>
+          <button className="quit-btn" onClick={onToggleMute} title={muted ? "Unmute" : "Mute"}>
+            {muted ? "Unmute" : "Mute"}
+          </button>
+          <button className="quit-btn" onClick={onQuit}>
+            Quit
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
+function BriefingScreen({
+  plan,
+  onBegin,
+  onCancel,
+}: {
+  plan: GamePlan;
+  onBegin: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="menu briefing">
+      <h1>{plan.title}</h1>
+      <div className="briefing-block">
+        <div className="briefing-tag">THE HOOK</div>
+        <p>{plan.hook}</p>
+      </div>
+      <div className="briefing-block">
+        <div className="briefing-tag">YOUR MISSION</div>
+        <p>{plan.mission}</p>
+      </div>
+      <div className="briefing-block stakes">
+        <div className="briefing-tag">THE STAKES</div>
+        <p>{plan.stakes}</p>
+      </div>
+      <div className="briefing-block">
+        <div className="briefing-tag">TIME ON THE CLOCK</div>
+        <p className="briefing-time">{formatTime(plan.timeLimitSec)}</p>
+      </div>
+      <div className="actions">
+        <button onClick={onCancel}>Back</button>
+        <button className="primary" onClick={onBegin}>
+          Begin
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function formatTime(s: number): string {
+  if (s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
 function prettyItemName(id: string): string {
-  if (id.startsWith("key_")) return "Key card";
-  if (id.startsWith("code_")) return "Code slip";
+  // Items now look like "room0_item2" → "Offering #3"
+  const m = /^room\d+_item(\d+)$/.exec(id);
+  if (m) return `Offering #${parseInt(m[1]!, 10) + 1}`;
   return id.replace(/_/g, " ");
+}
+
+function describeItem(itemId: string, plan: GamePlan): string {
+  const m = /^(room\d+)_item(\d+)$/.exec(itemId);
+  if (m) {
+    const roomId = m[1]!;
+    const room = plan.rooms.find((r) => r.id === roomId);
+    return `An offering you picked up in ${room?.name ?? "an earlier room"}.\n\nIt belongs on the pedestal in that room — walk up to the pedestal and click it to place this offering.`;
+  }
+  return `Item: ${itemId}`;
 }
 
 function ModalView({
   modal,
+  inventory,
   onClose,
-  onSolveRiddle,
-  onSubmitKeypad,
+  onDeposit,
 }: {
   modal: ModalState;
+  inventory: string[];
   onClose: () => void;
-  onSolveRiddle: (obj: RoomObject, correct: boolean) => void;
-  onSubmitKeypad: (obj: RoomObject, code: string) => void;
+  onDeposit: (pedestal: RoomObject, itemId: string) => void;
 }) {
   if (modal.kind === "info") {
     return (
@@ -497,23 +663,106 @@ function ModalView({
       </div>
     );
   }
-  if (modal.kind === "riddle") {
-    return <RiddleModal obj={modal.object} onClose={onClose} onSolve={onSolveRiddle} />;
+  if (modal.kind === "sequence_clue") {
+    const seq = modal.object.sequenceSymbols ?? [];
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <h3>The mural</h3>
+          <p>{modal.object.description ?? "Four glowing symbols are carved in this order:"}</p>
+          <div className="symbol-row">
+            {seq.map((s, idx) => (
+              <div key={idx} className="symbol-cell">
+                <div className="symbol-glyph">{s}</div>
+                <div className="symbol-index">#{idx + 1}</div>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 13, color: "var(--muted)" }}>
+            Press the wall buttons in this exact order. A wrong button resets the sequence.
+          </p>
+          <div className="actions">
+            <button className="primary" onClick={onClose}>
+              Got it
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
-  if (modal.kind === "keypad") {
-    return <KeypadModal obj={modal.object} onClose={onClose} onSubmit={onSubmitKeypad} />;
+  if (modal.kind === "switch_clue") {
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <h3>A wiring diagram</h3>
+          <p style={{ whiteSpace: "pre-wrap" }}>{modal.object.description}</p>
+          <p style={{ fontSize: 13, color: "var(--muted)" }}>
+            Toggle the four wall switches until they match this pattern.
+          </p>
+          <div className="actions">
+            <button className="primary" onClick={onClose}>
+              Got it
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (modal.kind === "pedestal") {
+    const accepts = modal.object.acceptsItems ?? [];
+    const usable = inventory.filter((it) => accepts.includes(it));
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <h3>The pedestal</h3>
+          <p>
+            It has {accepts.length} empty slots. Place each offering you've collected from this
+            room.
+          </p>
+          {usable.length === 0 ? (
+            <p style={{ color: "var(--muted)" }}>
+              You don't carry anything that fits here yet. Look around for offerings on the
+              floor.
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {usable.map((it) => (
+                <button
+                  key={it}
+                  className="primary"
+                  onClick={() => onDeposit(modal.object, it)}
+                  style={{ justifyContent: "flex-start", textAlign: "left" }}
+                >
+                  Place: {prettyItemName(it)}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="actions">
+            <button onClick={onClose}>Close</button>
+          </div>
+        </div>
+      </div>
+    );
   }
   return null;
 }
 
 function titleForObject(obj: RoomObject): string {
+  if (obj.id.startsWith("inv_")) return prettyItemName(obj.name);
   switch (obj.kind) {
-    case "note":
-      return "A handwritten note";
-    case "keypad":
-      return "Electronic keypad";
-    case "container":
-      return "Container";
+    case "item":
+      return "Offering";
+    case "pedestal":
+      return "The pedestal";
+    case "sequence_clue":
+      return "Wall mural";
+    case "sequence_button":
+      return "Symbol button";
+    case "switch":
+      return "Wall switch";
+    case "switch_clue":
+      return "Wiring diagram";
     case "door":
       return "Door";
     case "exit":
@@ -521,114 +770,4 @@ function titleForObject(obj: RoomObject): string {
     default:
       return obj.name;
   }
-}
-
-function RiddleModal({
-  obj,
-  onClose,
-  onSolve,
-}: {
-  obj: RoomObject;
-  onClose: () => void;
-  onSolve: (obj: RoomObject, correct: boolean) => void;
-}) {
-  const [val, setVal] = useState("");
-  const [err, setErr] = useState("");
-  const submit = () => {
-    if (!val.trim()) return;
-    const ok =
-      val.trim().toLowerCase().replace(/[^a-z0-9 ]/g, "") ===
-      (obj.solution ?? "").toLowerCase().replace(/[^a-z0-9 ]/g, "");
-    if (ok) {
-      onSolve(obj, true);
-    } else {
-      setErr(obj.hint ?? "Not quite. Think again.");
-      onSolve(obj, false);
-    }
-  };
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>A handwritten note</h3>
-        <p>{obj.riddle}</p>
-        <input
-          autoFocus
-          placeholder="Your answer…"
-          value={val}
-          onChange={(e) => {
-            setVal(e.target.value);
-            setErr("");
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-          }}
-          style={{ width: "100%", marginTop: 12 }}
-        />
-        <div className="err-msg">{err}</div>
-        <div className="actions">
-          <button onClick={onClose}>Close</button>
-          <button className="primary" onClick={submit}>
-            Submit
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function KeypadModal({
-  obj,
-  onClose,
-  onSubmit,
-}: {
-  obj: RoomObject;
-  onClose: () => void;
-  onSubmit: (obj: RoomObject, code: string) => void;
-}) {
-  const [code, setCode] = useState("");
-  const [err, setErr] = useState("");
-  const press = (d: string) => {
-    if (code.length >= 4) return;
-    setErr("");
-    setCode((c) => c + d);
-  };
-  const back = () => setCode((c) => c.slice(0, -1));
-  const submit = () => {
-    if (code.length !== 4) {
-      setErr("Enter 4 digits.");
-      return;
-    }
-    if (code === obj.solution) {
-      onSubmit(obj, code);
-    } else {
-      setErr("Access denied.");
-      setCode("");
-      onSubmit(obj, code);
-    }
-  };
-  const digits = useMemo(() => ["1", "2", "3", "4", "5", "6", "7", "8", "9"], []);
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>Electronic keypad</h3>
-        <div className="digits">{code.padEnd(4, "•")}</div>
-        <div className="err-msg">{err}</div>
-        <div className="keypad">
-          {digits.map((d) => (
-            <button key={d} onClick={() => press(d)}>
-              {d}
-            </button>
-          ))}
-          <button onClick={back}>⌫</button>
-          <button onClick={() => press("0")}>0</button>
-          <button className="primary" onClick={submit}>
-            ✓
-          </button>
-        </div>
-        <div className="actions">
-          <button onClick={onClose}>Close</button>
-        </div>
-      </div>
-    </div>
-  );
 }

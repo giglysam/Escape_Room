@@ -14,14 +14,19 @@ export interface PlanReq {
 
 export type ObjectKind =
   | "door"
-  | "keypad"
-  | "key"
-  | "note"
-  | "tool"
-  | "switch"
-  | "container"
+  | "exit"
   | "decoration"
-  | "exit";
+  // Archetype A — Collect & Combine
+  | "item"
+  | "pedestal"
+  // Archetype B — Symbol Sequence
+  | "sequence_clue"
+  | "sequence_button"
+  // Archetype C — Logic Switches
+  | "switch"
+  | "switch_clue";
+
+export type PuzzleArchetype = "collect" | "sequence" | "switches";
 
 export interface RoomObject {
   id: string;
@@ -35,13 +40,31 @@ export interface RoomObject {
   interactable: boolean;
   removeBackground: boolean;
   kind: ObjectKind;
+  /** Items needed to interact (e.g. a door waiting for a key flag). */
   requires?: string;
+  /** Item id given to the player on use (collected items). */
   gives?: string;
-  riddle?: string;
-  solution?: string;
-  unlocks?: string;
+  /** Description shown in info popup. */
   description?: string;
+  /** Hint shown after a wrong attempt. */
   hint?: string;
+
+  // ---- Archetype-specific data ----
+
+  /** sequence_clue / sequence_button / switch_clue / pedestal — the symbol shown. */
+  symbol?: string;
+  /** sequence_button: which slot in the sequence this button represents (0..n). */
+  symbolIndex?: number;
+  /** switch: 0/1 = currently on/off (initial state). */
+  initialOn?: boolean;
+  /** switch: must this switch be ON in the target pattern? */
+  targetOn?: boolean;
+  /** pedestal: list of item ids that must be deposited (any order). */
+  acceptsItems?: string[];
+  /** sequence_clue: the full ordered list of symbols. */
+  sequenceSymbols?: string[];
+  /** Which puzzle archetype this object belongs to. */
+  puzzle?: PuzzleArchetype;
 }
 
 export interface RoomPlan {
@@ -57,6 +80,16 @@ export interface GamePlan {
   title: string;
   story: string;
   difficulty: string;
+  /**
+   * Section 1 of the blueprint — Core Concept & Narrative.
+   * These fields are used by the briefing screen, the persistent objective
+   * banner, and the timeout / lose-state messaging.
+   */
+  mission: string;
+  hook: string;
+  stakes: string;
+  /** Total seconds available to escape across all rooms. */
+  timeLimitSec: number;
   rooms: RoomPlan[];
 }
 
@@ -83,286 +116,693 @@ function pick<T>(rng: () => number, arr: T[]): T {
   return arr[Math.floor(rng() * arr.length)]!;
 }
 
-const RIDDLES: { q: string; a: string }[] = [
-  {
-    q: "I have keys but no locks. I have space but no room. You can enter, but you can't go inside. What am I?",
-    a: "keyboard",
-  },
-  { q: "The more you take, the more you leave behind. What are they?", a: "footsteps" },
-  {
-    q: "I speak without a mouth and hear without ears. I have nobody, but come alive with the wind. What am I?",
-    a: "echo",
-  },
-  { q: "What has hands but cannot clap?", a: "clock" },
-  { q: "What runs but never walks, has a mouth but never talks?", a: "river" },
-  { q: "What gets wetter the more it dries?", a: "towel" },
-  { q: "I'm tall when I'm young, and short when I'm old. What am I?", a: "candle" },
-  { q: "What has a face and two hands but no arms or legs?", a: "clock" },
-  { q: "Forward I am heavy, backward I am not. What am I?", a: "ton" },
-  { q: "What can travel around the world while staying in a corner?", a: "stamp" },
-];
+/** Unicode glyphs we use for the on-screen symbol sequence puzzle. They are
+ * deliberately abstract so they read as "ancient runes / glyphs / sigils"
+ * regardless of theme. */
+const SYMBOL_POOL = ["✦", "✧", "✪", "✺", "❖", "✷", "✶", "❂", "☥", "✹"];
 
 interface ThemeDef {
   title: string;
   story: string;
+  /** Mission / Hook / Stakes per the blueprint section 1. */
+  mission: string;
+  hook: string;
+  stakes: string;
+  /** Background prompts per room (full scene including environment). */
   bgs: string[];
+  /** Display name per room. */
   rooms: string[];
   ambient: string[];
-  containerStyle: "drawer" | "locker" | "chest";
+  /** Prompt fragment for the door object (per room). */
+  doorPrompts: string[];
+  /** Pool of small thematic decoration objects (never buildings). */
   decoStyles: string[];
+  // ---- Archetype-specific theme prompts ----
+  /** A — Collect & Combine: 3 thematic items + the pedestal/altar that accepts them. */
+  itemPrompts: string[];
+  pedestalPrompt: string;
+  /** B — Sequence: a wall mural showing symbols, plus a generic button look. */
+  muralPrompt: string;
+  buttonPrompt: string;
+  /** C — Switches: a wall switch and the deco object whose surface holds the clue. */
+  switchPrompt: string;
+  cluePropPrompt: string;
 }
+
+const BG_STYLE =
+  "interior wide shot, side-scrolling 2D perspective view, single empty room with back wall and floor visible, no characters, no people, no creatures, no text, cinematic lighting, ultra detailed concept art, painterly, 16:9";
 
 const THEMES: ThemeDef[] = [
   {
     title: "Neural Lab Breakout",
     story:
       "You wake inside a rogue AI research lab. Self-destruct in T-minus unknown. Find the override codes and escape before the neural core melts down.",
+    mission: "Reach the surface airlock before the neural core melts down.",
+    hook: "An encrypted ping woke you in cold storage. The lab is on emergency power, the AI is still online, and only the maintenance corridors are unlocked.",
+    stakes: "If you fail, the core breaches and the entire research wing — and you with it — is reduced to slag.",
     bgs: [
-      "dark futuristic AI laboratory interior, glowing blue server racks, holographic terminals, cinematic wide shot, side-scrolling perspective view, no people, ultra detailed concept art",
-      "abandoned cyberpunk server room, red emergency lights, tangled fiber optic cables, side-scrolling perspective view, no people, dramatic lighting, ultra detailed",
-      "secret AI vault with massive sealed bulkhead door, glowing runes of code on walls, side-scrolling perspective view, no people, ultra detailed",
+      `dark futuristic AI laboratory empty interior, glowing blue server racks along the walls, holographic readouts, ${BG_STYLE}`,
+      `abandoned cyberpunk server room empty interior, red emergency lights, tangled fiber optic cables on the walls, ${BG_STYLE}`,
+      `secret AI vault empty interior, glowing lines of code projected on the back wall, ${BG_STYLE}`,
     ],
     rooms: ["Control Room", "Server Vault", "Core Chamber"],
     ambient: ["#0b1424", "#1a0a14", "#0a1a18"],
-    containerStyle: "locker",
-    decoStyles: [
-      "vintage server tower with blinking LEDs",
-      "tangle of fiber optic cables glowing blue",
-      "broken holographic projector",
+    doorPrompts: [
+      "heavy futuristic sealed sliding metal door with glowing blue accents",
+      "armored bulkhead door with red status light, sci-fi",
+      "massive vault door covered in glowing circuit lines",
     ],
+    decoStyles: [
+      "small vintage desktop server tower with blinking LEDs",
+      "small tangle of fiber optic cables glowing blue",
+      "broken holographic projector device",
+      "lab beaker with glowing liquid",
+      "discarded VR headset",
+    ],
+    itemPrompts: [
+      "small glowing blue power core cell, sci-fi",
+      "small fingerprint authentication chip, sci-fi",
+      "small holographic memory crystal, sci-fi",
+    ],
+    pedestalPrompt:
+      "futuristic metallic console pedestal with three empty circular slots glowing blue, sci-fi",
+    muralPrompt:
+      "futuristic wall display screen showing a glowing sequence of four ancient symbols, sci-fi",
+    buttonPrompt: "small futuristic backlit hexagonal symbol button with glowing edges, sci-fi",
+    switchPrompt:
+      "industrial wall mounted heavy duty toggle switch with red and green indicator light, sci-fi",
+    cluePropPrompt:
+      "small futuristic data tablet displaying a wiring diagram of switches, sci-fi",
   },
   {
     title: "Beirut Antiquarian Heist",
     story:
       "You're locked in a forgotten antique shop in old Beirut. Lebanese mosaics hide ancient mechanisms. Crack them before dawn or be sealed in forever.",
+    mission: "Reach the rooftop courtyard before the call to dawn prayer.",
+    hook: "The collector who hired you vanished an hour ago. The shop's door bolted itself the moment you stepped inside, and the mosaics on the walls have started glowing.",
+    stakes: "At first light the building's ancient lock-stones fuse permanently — you stay buried with the artifacts forever.",
     bgs: [
-      "old Beirut antique shop interior, ottoman lamps, persian rugs, dusty bookshelves, side-scrolling perspective view, warm cinematic light, no people, ultra detailed",
-      "phoenician hidden chamber with stone tablets and brass mechanisms, torchlight, side-scrolling perspective view, no people, ultra detailed",
-      "rooftop courtyard above old Beirut, moonlit, ornate door covered in carvings, side-scrolling perspective view, no people, ultra detailed",
+      `old Beirut antique shop empty interior, ottoman lamps on shelves, persian rug on the floor, dusty bookshelves on the back wall, warm cinematic light, ${BG_STYLE}`,
+      `phoenician hidden chamber empty interior, stone tablets carved into the back wall, brass mechanisms, torchlight, ${BG_STYLE}`,
+      `rooftop courtyard above old Beirut at night, moonlit, ornate carved stone wall, ${BG_STYLE}`,
     ],
     rooms: ["Antique Shop", "Hidden Chamber", "Rooftop Exit"],
     ambient: ["#1a1208", "#0e0a06", "#0a1018"],
-    containerStyle: "chest",
+    doorPrompts: [
+      "old ornate carved wooden door with brass handle",
+      "heavy ancient stone door covered in phoenician carvings",
+      "tall arched ornate cedar door covered in islamic geometric carvings",
+    ],
     decoStyles: [
       "ornate ottoman oil lamp glowing",
       "stack of dusty old leather books",
       "brass arabian teapot",
+      "small persian carpet rolled up",
+      "engraved silver tray",
     ],
+    itemPrompts: [
+      "small ornate brass key with arabic engraving, antique",
+      "small phoenician bronze coin with engraved markings, antique",
+      "small carved cedar wood amulet, antique",
+    ],
+    pedestalPrompt:
+      "ornate stone altar pedestal with three empty engraved indentations on top, antique middle eastern style",
+    muralPrompt:
+      "ancient stone wall mural with a row of four carved phoenician symbols glowing softly, antique",
+    buttonPrompt: "small carved brass button with a single engraved phoenician symbol, antique",
+    switchPrompt:
+      "antique brass wall lever with two positions and an engraved indicator, ornate ottoman style",
+    cluePropPrompt:
+      "old yellowed parchment scroll showing a row of four levers with some highlighted, antique ink drawing",
   },
   {
     title: "Derelict Starship Sigma",
     story:
       "Cryo-sleep failed. The starship Sigma is silent and the airlock is sealed. Reroute power, override the captain's lock, reach the escape pod.",
+    mission: "Reach Escape Pod Bay 3 before life support runs out.",
+    hook: "Your cryo-pod popped open hours after the rest of the crew vanished. Comms are dead. The ship is drifting toward a star, and atmospheric pressure is dropping by the minute.",
+    stakes: "Fail and the hull boils away as Sigma falls into the corona — you are vapor.",
     bgs: [
-      "interior of a derelict spaceship corridor, flickering ceiling lights, floating dust, side-scrolling perspective view, no people, ultra detailed sci-fi concept art",
-      "spaceship engine room with broken plasma conduits, sparks, side-scrolling perspective view, no people, ultra detailed",
-      "spaceship escape pod bay with sealed circular hatch, warning lights, side-scrolling perspective view, no people, ultra detailed",
+      `interior of a derelict spaceship corridor, empty, flickering ceiling lights, floating dust, ${BG_STYLE}`,
+      `spaceship engine room empty interior, broken plasma conduits along the back wall, sparks, ${BG_STYLE}`,
+      `spaceship escape pod bay empty interior, sealed circular hatch on the back wall, warning lights, ${BG_STYLE}`,
     ],
     rooms: ["Corridor", "Engine Room", "Pod Bay"],
     ambient: ["#06101a", "#1a0c06", "#040a14"],
-    containerStyle: "locker",
-    decoStyles: [
-      "broken engineering helmet on the floor",
-      "sparking power conduit",
-      "floating zero-gravity coffee mug",
+    doorPrompts: [
+      "sealed sci-fi airlock door with porthole window",
+      "armored engineering bulkhead door with rivets",
+      "circular escape pod hatch with red warning light",
     ],
+    decoStyles: [
+      "broken engineering helmet",
+      "sparking power conduit segment",
+      "floating zero-gravity coffee mug",
+      "small portable oxygen tank",
+      "discarded clipboard with technical schematics",
+    ],
+    itemPrompts: [
+      "small spaceship plasma fuse cylinder, sci-fi",
+      "small captain access keycard, sci-fi",
+      "small spaceship coolant capsule, sci-fi",
+    ],
+    pedestalPrompt:
+      "spaceship engineering console pedestal with three empty receptacle slots, sci-fi",
+    muralPrompt:
+      "spaceship wall display screen showing a glowing sequence of four navigation symbols, sci-fi",
+    buttonPrompt: "small spaceship console button with a single glowing symbol, sci-fi",
+    switchPrompt:
+      "spaceship wall mounted breaker switch with status LED, industrial sci-fi",
+    cluePropPrompt:
+      "small data tablet displaying a circuit breaker diagram with some breakers highlighted, sci-fi",
   },
   {
     title: "Witch's Mountain Cabin",
     story:
       "You sheltered from a storm in a cabin that locked behind you. Old runes and bubbling potions hint at a way out — if you can read them in time.",
+    mission: "Reach the forest gate before the witch returns from her hunt.",
+    hook: "The storm chased you into a cabin you didn't choose. The door slammed itself shut and the candles lit themselves the moment you crossed the threshold.",
+    stakes: "When the witch comes home she'll add you to her shelf of curiosities — labelled and preserved.",
     bgs: [
-      "interior of an old witch's wooden cabin, hanging herbs, glowing potion bottles, candlelight, side-scrolling perspective view, no people, ultra detailed",
-      "stone cellar under a witch's cabin, runic circle on the floor, side-scrolling perspective view, no people, ultra detailed",
-      "moonlit forest clearing with a heavy iron gate covered in runes, side-scrolling perspective view, no people, ultra detailed",
+      `interior of an old witch wooden cabin, empty, hanging herbs from the ceiling, candlelight, ${BG_STYLE}`,
+      `stone cellar empty interior under a witch cabin, runic circle on the stone floor, ${BG_STYLE}`,
+      `moonlit forest clearing at night, ${BG_STYLE}`,
     ],
     rooms: ["Cabin", "Cellar", "Forest Gate"],
     ambient: ["#100a04", "#08040a", "#040a08"],
-    containerStyle: "chest",
+    doorPrompts: [
+      "old creaky wooden plank door with iron hinges",
+      "heavy stone cellar door with iron rivets",
+      "tall iron forest gate covered in glowing runes",
+    ],
     decoStyles: [
       "bubbling green potion bottle",
       "old wooden broomstick",
       "stack of spellbooks bound in leather",
+      "wooden cauldron with smoke",
+      "skull candle holder",
     ],
+    itemPrompts: [
+      "small glowing red potion vial with a cork stopper",
+      "small carved bone rune talisman",
+      "small dried herb bundle tied with twine",
+    ],
+    pedestalPrompt:
+      "old wooden ritual pedestal with three empty engraved circles on top, mystical witch style",
+    muralPrompt:
+      "old wooden plank wall with four glowing carved runes in a row, mystical",
+    buttonPrompt: "small carved wooden button with a single glowing rune, mystical",
+    switchPrompt:
+      "old iron wall lever with a glowing rune indicator, mystical witch style",
+    cluePropPrompt:
+      "old torn parchment showing a row of four levers with some highlighted, witch ink drawing",
   },
 ];
+
+/**
+ * Build a ThemeDef on the fly from a freeform user theme. The whole story,
+ * backgrounds, props and decor are phrased in terms of the theme — never
+ * hard-coded as a "lab" or "cabin".
+ */
+function buildCustomTheme(theme: string): ThemeDef {
+  const t = theme.trim();
+  // Three sub-locations let the playthrough feel like a journey, all inside
+  // the theme's world. Phrased as "of {theme}" so the model treats {theme}
+  // as the world, not a furniture style.
+  return {
+    title: `Custom Run · ${t}`,
+    story: `You are trapped inside a place themed around ${t}. Solve the puzzles in each room to escape.`,
+    mission: `Reach the final exit of the world of ${t} before time runs out.`,
+    hook: `You woke up inside the world of ${t}. The way you came in has sealed itself behind you, and three locked rooms stand between you and the outside.`,
+    stakes: `If the timer hits zero, the world of ${t} collapses inward and you are lost in it forever.`,
+    rooms: [`Entrance of ${t}`, `Heart of ${t}`, `Exit of ${t}`],
+    ambient: ["#0c0c18", "#180c10", "#0a1018"],
+    bgs: [
+      `entrance area inside the world of ${t}, empty room interior with back wall and floor visible, environment fully themed around ${t}, single empty space, ${BG_STYLE}`,
+      `central chamber inside the world of ${t}, empty room interior with thematic decorations on the back wall, environment fully themed around ${t}, ${BG_STYLE}`,
+      `exit chamber inside the world of ${t}, empty room interior with a tall ornate door on the back wall, environment fully themed around ${t}, ${BG_STYLE}`,
+    ],
+    doorPrompts: [
+      `tall ornate door themed around ${t}, fits the world of ${t}`,
+      `heavy decorated door themed around ${t}, fits the world of ${t}`,
+      `final exit door themed around ${t}, fits the world of ${t}, glowing edges`,
+    ],
+    decoStyles: [
+      `small thematic object related to ${t}`,
+      `small everyday item that fits inside the world of ${t}`,
+      `small symbolic prop representing ${t}`,
+      `small lit lamp or light source styled to fit ${t}`,
+      `small piece of furniture-sized prop that belongs in ${t}`,
+    ],
+    itemPrompts: [
+      `small ritual item number one belonging to the world of ${t}, single small object`,
+      `small ritual item number two belonging to the world of ${t}, single small object`,
+      `small ritual item number three belonging to the world of ${t}, single small object`,
+    ],
+    pedestalPrompt: `ornate pedestal or altar with three empty receptacles on top, themed around ${t}, fits the world of ${t}`,
+    muralPrompt: `wall mural or display showing a sequence of four glowing symbols, themed around ${t}, fits the world of ${t}`,
+    buttonPrompt: `small button with a single glowing symbol, themed around ${t}, fits the world of ${t}`,
+    switchPrompt: `wall mounted toggle switch or lever with a status indicator, themed around ${t}, fits the world of ${t}`,
+    cluePropPrompt: `small clue prop showing a diagram of switches with some highlighted, themed around ${t}, fits the world of ${t}`,
+  };
+}
 
 export const PLAN_CANVAS = { width: W, height: H, floorTop: FLOOR_TOP };
 
 const OBJ_STYLE =
-  "centered subject on a pure plain solid white background, isolated, no shadow, product photo style, no environment, no people, ultra detailed, sharp focus";
+  "single small object only, centered subject on a pure plain solid white background, isolated, no shadow, product photo style, no environment, no room, no building, no house, no cabin, no architecture, no people, no creatures, no text, ultra detailed, sharp focus";
 
 export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
   const seed = req.seed ?? Math.floor(Math.random() * 1e9);
   const rng = mulberry32(seed);
 
-  // If user typed a theme, blend it with a base template (use first theme)
-  // but keep visual variety by also picking randomly within prompts.
-  const base = req.theme ? THEMES[0]! : pick(rng, THEMES);
-  const titleOverride = req.theme ? `Custom Run · ${req.theme}` : base.title;
+  // When the user typed a theme we synthesise a fully theme-driven ThemeDef
+  // so backgrounds, doors, keypad, container, note and decor are ALL phrased
+  // in terms of their theme — never leak in a default lab/cabin look.
+  const base: ThemeDef = req.theme ? buildCustomTheme(req.theme) : pick(rng, THEMES);
+  const titleOverride = base.title;
 
   const numRooms = Math.max(2, Math.min(3, req.rooms ?? 3));
 
-  const usedRiddles = new Set<number>();
-  const pickRiddle = () => {
-    let i = randInt(rng, 0, RIDDLES.length - 1);
-    let tries = 0;
-    while (usedRiddles.has(i) && tries < 20) {
-      i = randInt(rng, 0, RIDDLES.length - 1);
-      tries++;
-    }
-    usedRiddles.add(i);
-    return RIDDLES[i]!;
-  };
+  // Pick a starting archetype, then rotate so every room is mechanically
+  // different. With 3 rooms each playthrough hits all three archetypes.
+  const ARCHETYPES: PuzzleArchetype[] = ["collect", "sequence", "switches"];
+  const startArch = randInt(rng, 0, ARCHETYPES.length - 1);
 
   const rooms: RoomPlan[] = [];
-
   for (let i = 0; i < numRooms; i++) {
-    const isLast = i === numRooms - 1;
-    const isFirst = i === 0;
-    const ridd = pickRiddle();
-    const code = String(randInt(rng, 1000, 9999));
-    const roomId = `room${i}`;
-
-    const objects: RoomObject[] = [];
-
-    // ---- DOOR / EXIT ----
-    const themeForCustom = req.theme ? `${req.theme}, ` : "";
-    const doorPrompt = isLast
-      ? `${themeForCustom}large heavy ornate exit door with glowing edges, ${OBJ_STYLE}`
-      : `${themeForCustom}closed heavy interior door with a small panel, ${OBJ_STYLE}`;
-
-    objects.push({
-      id: `${roomId}_door`,
-      name: "door",
-      prompt: doorPrompt,
-      x: 860,
-      y: 200,
-      width: 140,
-      height: 280,
-      collidable: true,
-      interactable: true,
-      removeBackground: true,
-      kind: isLast ? "exit" : "door",
-      requires: `key_${roomId}`,
-      description: isLast
-        ? "The final exit. It needs a key card to unlock."
-        : "A heavy door. It seems to need a key from this room.",
-    });
-
-    // ---- KEYPAD ----
-    objects.push({
-      id: `${roomId}_keypad`,
-      name: "keypad",
-      prompt: `${themeForCustom}wall mounted electronic keypad with a glowing 4 digit display, ${OBJ_STYLE}`,
-      x: randInt(rng, 70, 220),
-      y: 180,
-      width: 96,
-      height: 130,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "keypad",
-      solution: code,
-      gives: `key_${roomId}`,
-      description: "A 4-digit keypad. Find the code somewhere in this room.",
-      hint: `The code starts with ${code[0]}.`,
-    });
-
-    // ---- NOTE WITH RIDDLE ----
-    objects.push({
-      id: `${roomId}_note`,
-      name: "note",
-      prompt: `${themeForCustom}crumpled paper note with handwritten cryptic message, ${OBJ_STYLE}`,
-      x: randInt(rng, 380, 720),
-      y: randInt(rng, FLOOR_TOP + 10, H - 110),
-      width: 70,
-      height: 60,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "note",
-      riddle: ridd.q,
-      solution: ridd.a,
-      description: `A scrap of paper. There's a riddle scribbled on it.\n\n"${ridd.q}"\n\nAnswer correctly to reveal a clue.`,
-      hint: `Hint: it starts with the letter "${ridd.a[0]}".`,
-    });
-
-    // ---- CONTAINER (reveals code after riddle solved) ----
-    const containerPrompt =
-      base.containerStyle === "drawer"
-        ? `${themeForCustom}wooden drawer slightly open, ${OBJ_STYLE}`
-        : base.containerStyle === "chest"
-          ? `${themeForCustom}small treasure chest slightly open, ${OBJ_STYLE}`
-          : `${themeForCustom}metal storage locker slightly open, ${OBJ_STYLE}`;
-
-    objects.push({
-      id: `${roomId}_container`,
-      name: "container",
-      prompt: containerPrompt,
-      x: randInt(rng, 290, 560),
-      y: 360,
-      width: 110,
-      height: 110,
-      collidable: true,
-      interactable: true,
-      removeBackground: true,
-      kind: "container",
-      requires: `riddle_${roomId}_solved`,
-      gives: `code_${roomId}`,
-      description: "A container. It looks locked. Maybe a clue first?",
-    });
-
-    // ---- DECOR pieces ----
-    const decoIdx0 = randInt(rng, 0, base.decoStyles.length - 1);
-    objects.push({
-      id: `${roomId}_deco1`,
-      name: "deco1",
-      prompt: `${themeForCustom}${base.decoStyles[decoIdx0]}, ${OBJ_STYLE}`,
-      x: randInt(rng, 60, 220),
-      y: randInt(rng, FLOOR_TOP - 40, H - 220),
-      width: 90,
-      height: 130,
-      collidable: true,
-      interactable: false,
-      removeBackground: true,
-      kind: "decoration",
-    });
-
-    let decoIdx1 = randInt(rng, 0, base.decoStyles.length - 1);
-    if (decoIdx1 === decoIdx0) decoIdx1 = (decoIdx1 + 1) % base.decoStyles.length;
-    objects.push({
-      id: `${roomId}_deco2`,
-      name: "deco2",
-      prompt: `${themeForCustom}${base.decoStyles[decoIdx1]}, ${OBJ_STYLE}`,
-      x: randInt(rng, 600, 800),
-      y: randInt(rng, FLOOR_TOP - 30, H - 200),
-      width: 90,
-      height: 120,
-      collidable: true,
-      interactable: false,
-      removeBackground: true,
-      kind: "decoration",
-    });
-
-    rooms.push({
-      id: roomId,
-      name: base.rooms[i] ?? `Room ${i + 1}`,
-      background_prompt: base.bgs[i] ?? base.bgs[0]!,
-      ambient_color: base.ambient[i] ?? "#0a0a14",
-      objects,
-      intro: isFirst
-        ? `You wake up in the ${base.rooms[i]}. The door behind you is sealed.`
-        : isLast
-          ? `You enter the final room: the ${base.rooms[i]}. Freedom is close.`
-          : `You step into the ${base.rooms[i]}. The deeper you go, the stranger it gets.`,
-    });
+    const arch = ARCHETYPES[(startArch + i) % ARCHETYPES.length]!;
+    rooms.push(buildRoom(rng, base, i, numRooms, arch));
   }
+
+  // Difficulty → time budget. Easier runs give more thinking time. The
+  // blueprint says easy start, hard middle, adrenaline finish — the timer
+  // creates the climax automatically.
+  const difficulty = req.difficulty ?? "normal";
+  const baseSeconds = difficulty === "easy" ? 540 : difficulty === "hard" ? 300 : 420;
 
   return {
     title: titleOverride,
     story: base.story,
-    difficulty: req.difficulty ?? "normal",
+    difficulty,
+    mission: base.mission,
+    hook: base.hook,
+    stakes: base.stakes,
+    timeLimitSec: baseSeconds,
     rooms,
   };
+}
+
+// ===============================================================
+// Room builders — one per puzzle archetype
+// ===============================================================
+
+interface RoomLayout {
+  WALL_TOP: number;
+  WALL_BOT: number;
+  FLOOR_BOT: number;
+  doorX: number;
+  doorY: number;
+  doorW: number;
+  doorH: number;
+}
+
+function makeLayout(): RoomLayout {
+  const WALL_TOP = 110;
+  const WALL_BOT = FLOOR_TOP - 20;
+  const FLOOR_BOT = H - 30;
+  const doorW = 150;
+  const doorH = 290;
+  const doorX = W - doorW - 22;
+  const doorY = WALL_TOP - 10;
+  return { WALL_TOP, WALL_BOT, FLOOR_BOT, doorX, doorY, doorW, doorH };
+}
+
+function makeDoor(
+  base: ThemeDef,
+  i: number,
+  isLast: boolean,
+  layout: RoomLayout,
+  description: string,
+): RoomObject {
+  const doorBase =
+    base.doorPrompts[i] ?? base.doorPrompts[base.doorPrompts.length - 1] ?? "heavy door";
+  const doorPrompt = isLast
+    ? `${doorBase}, large heavy ornate exit door with glowing edges, ${OBJ_STYLE}`
+    : `${doorBase}, closed, ${OBJ_STYLE}`;
+  return {
+    id: `room${i}_door`,
+    name: "door",
+    prompt: doorPrompt,
+    x: layout.doorX,
+    y: layout.doorY,
+    width: layout.doorW,
+    height: layout.doorH,
+    collidable: true,
+    interactable: true,
+    removeBackground: true,
+    kind: isLast ? "exit" : "door",
+    requires: `door_${`room${i}`}_unlocked`,
+    description,
+  };
+}
+
+function makeWallDeco(
+  base: ThemeDef,
+  rng: () => number,
+  i: number,
+  layout: RoomLayout,
+  excludeIdx?: number,
+): RoomObject {
+  let idx = randInt(rng, 0, base.decoStyles.length - 1);
+  if (excludeIdx !== undefined && idx === excludeIdx)
+    idx = (idx + 1) % base.decoStyles.length;
+  return {
+    id: `room${i}_deco_wall`,
+    name: "deco_wall",
+    prompt: `${base.decoStyles[idx]}, ${OBJ_STYLE}`,
+    x: randInt(rng, 8, 22),
+    y: layout.WALL_BOT - 130,
+    width: 88,
+    height: 130,
+    collidable: false,
+    interactable: false,
+    removeBackground: true,
+    kind: "decoration",
+  };
+}
+
+function buildRoom(
+  rng: () => number,
+  base: ThemeDef,
+  i: number,
+  numRooms: number,
+  arch: PuzzleArchetype,
+): RoomPlan {
+  const isLast = i === numRooms - 1;
+  const isFirst = i === 0;
+  const roomId = `room${i}`;
+  const layout = makeLayout();
+
+  // Difficulty curve: room 0 = easy / 3 elements, mid = 4, last = 5.
+  // Scales the size of the active puzzle so later rooms feel harder.
+  const elements = isFirst ? 3 : isLast ? 5 : 4;
+
+  let objects: RoomObject[];
+  let archIntro: string;
+
+  if (arch === "collect") {
+    [objects, archIntro] = buildCollectRoom(rng, base, i, isLast, layout, elements);
+  } else if (arch === "sequence") {
+    [objects, archIntro] = buildSequenceRoom(rng, base, i, isLast, layout, elements);
+  } else {
+    [objects, archIntro] = buildSwitchesRoom(rng, base, i, isLast, layout, elements);
+  }
+
+  const baseIntro = isFirst
+    ? `You wake up in the ${base.rooms[i]}. The door behind you is sealed.`
+    : isLast
+      ? `You enter the final room: the ${base.rooms[i]}. Freedom is close.`
+      : `You step into the ${base.rooms[i]}. The deeper you go, the stranger it gets.`;
+
+  return {
+    id: roomId,
+    name: base.rooms[i] ?? `Room ${i + 1}`,
+    background_prompt: base.bgs[i] ?? base.bgs[0]!,
+    ambient_color: base.ambient[i] ?? "#0a0a14",
+    objects,
+    intro: `${baseIntro}\n\n${archIntro}`,
+  };
+}
+
+// ---------------- A) COLLECT & COMBINE ----------------
+
+function buildCollectRoom(
+  rng: () => number,
+  base: ThemeDef,
+  i: number,
+  isLast: boolean,
+  layout: RoomLayout,
+  elements: number,
+): [RoomObject[], string] {
+  const roomId = `room${i}`;
+  const objects: RoomObject[] = [];
+  const N = Math.max(2, Math.min(5, elements));
+
+  objects.push(
+    makeDoor(
+      base,
+      i,
+      isLast,
+      layout,
+      `A heavy door. The lock takes ${N} offerings — find them and place them on the pedestal.`,
+    ),
+  );
+  objects.push(makeWallDeco(base, rng, i, layout));
+
+  // Spread N item slots across the floor band, leaving space for the pedestal
+  // at center-back. Slot 0 = far left, last slot = far right.
+  const itemSlots: { x: number; y: number; w: number; h: number }[] = [];
+  const lanes = N;
+  const laneW = 800 / lanes;
+  for (let k = 0; k < N; k++) {
+    const cx = 60 + laneW * k + randInt(rng, 0, Math.max(1, Math.floor(laneW - 70)));
+    // alternate between low (front floor) and high (back floor) so they read
+    const high = k % 2 === 0;
+    const y = high ? layout.FLOOR_BOT - 65 : layout.FLOOR_BOT - 105;
+    itemSlots.push({ x: cx, y, w: 60, h: 60 });
+  }
+
+  const itemIds: string[] = [];
+  for (let k = 0; k < N; k++) {
+    const id = `${roomId}_item${k}`;
+    const slot = itemSlots[k]!;
+    const promptIdx = k % base.itemPrompts.length;
+    objects.push({
+      id,
+      name: `item${k}`,
+      prompt: `${base.itemPrompts[promptIdx]}, ${OBJ_STYLE}`,
+      x: slot.x,
+      y: slot.y,
+      width: slot.w,
+      height: slot.h,
+      collidable: false,
+      interactable: true,
+      removeBackground: true,
+      kind: "item",
+      gives: id,
+      puzzle: "collect",
+      description: "A small object. You can pick it up.",
+    });
+    itemIds.push(id);
+  }
+
+  // pedestal — center on back floor, accepts all items
+  objects.push({
+    id: `${roomId}_pedestal`,
+    name: "pedestal",
+    prompt: `${base.pedestalPrompt}, ${OBJ_STYLE}`,
+    x: randInt(rng, 440, 520),
+    y: layout.FLOOR_BOT - 160,
+    width: 160,
+    height: 160,
+    collidable: true,
+    interactable: true,
+    removeBackground: true,
+    kind: "pedestal",
+    acceptsItems: itemIds,
+    puzzle: "collect",
+    description: `A pedestal with ${N} empty slots. It seems to be waiting for offerings.`,
+  });
+
+  return [
+    objects,
+    `${N} offerings are scattered around. Pick each one up and place it on the pedestal — in any order.`,
+  ];
+}
+
+// ---------------- B) SYMBOL SEQUENCE ----------------
+
+function buildSequenceRoom(
+  rng: () => number,
+  base: ThemeDef,
+  i: number,
+  isLast: boolean,
+  layout: RoomLayout,
+  elements: number,
+): [RoomObject[], string] {
+  const roomId = `room${i}`;
+  const objects: RoomObject[] = [];
+  const N = Math.max(3, Math.min(5, elements));
+
+  // Pick N unique symbols
+  const pool = [...SYMBOL_POOL];
+  const seq: string[] = [];
+  for (let k = 0; k < N; k++) {
+    const idx = randInt(rng, 0, pool.length - 1);
+    seq.push(pool.splice(idx, 1)[0]!);
+  }
+
+  objects.push(
+    makeDoor(
+      base,
+      i,
+      isLast,
+      layout,
+      "The door has no handle, only a faint hum. The wall buttons must be pressed in the right order.",
+    ),
+  );
+  objects.push(makeWallDeco(base, rng, i, layout));
+
+  // Mural — back wall, left side, shows the sequence
+  objects.push({
+    id: `${roomId}_mural`,
+    name: "mural",
+    prompt: `${base.muralPrompt}, ${OBJ_STYLE}`,
+    x: randInt(rng, 90, 160),
+    y: layout.WALL_TOP + 20,
+    width: 220,
+    height: 130,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "sequence_clue",
+    sequenceSymbols: seq,
+    puzzle: "sequence",
+    description: `A mural shows ${N} symbols glowing in a sequence.`,
+  });
+
+  // N buttons on the floor band, displayed in *shuffled* order so the sequence
+  // matters (not just left-to-right).
+  const order = Array.from({ length: N }, (_, k) => k);
+  for (let s = order.length - 1; s > 0; s--) {
+    const j = randInt(rng, 0, s);
+    [order[s], order[j]] = [order[j]!, order[s]!];
+  }
+  const buttonY = layout.FLOOR_BOT - 90;
+  const totalW = 800;
+  const stepX = totalW / N;
+  const startX = 70;
+  for (let k = 0; k < N; k++) {
+    const symbolIdx = order[k]!;
+    objects.push({
+      id: `${roomId}_btn${k}`,
+      name: `btn${k}`,
+      prompt: `${base.buttonPrompt}, ${OBJ_STYLE}`,
+      x: Math.round(startX + k * stepX),
+      y: buttonY,
+      width: 78,
+      height: 78,
+      collidable: false,
+      interactable: true,
+      removeBackground: true,
+      kind: "sequence_button",
+      symbol: seq[symbolIdx]!,
+      symbolIndex: symbolIdx,
+      puzzle: "sequence",
+      description: `A button engraved with the symbol ${seq[symbolIdx]}.`,
+    });
+  }
+
+  return [
+    objects,
+    `Read the mural's order, then press the ${N} wall buttons in the correct sequence.`,
+  ];
+}
+
+// ---------------- C) LOGIC SWITCHES ----------------
+
+function buildSwitchesRoom(
+  rng: () => number,
+  base: ThemeDef,
+  i: number,
+  isLast: boolean,
+  layout: RoomLayout,
+  elements: number,
+): [RoomObject[], string] {
+  const roomId = `room${i}`;
+  const objects: RoomObject[] = [];
+  const N = Math.max(3, Math.min(6, elements));
+
+  // Target pattern: N booleans, ensure between ⌈N/3⌉ and N-1 are ON so it's
+  // never trivial (all on / all off) and never empty.
+  const minOn = Math.ceil(N / 3);
+  const maxOn = N - 1;
+  let target: boolean[] = [];
+  let triesLeft = 64;
+  do {
+    target = Array.from({ length: N }, () => rng() < 0.5);
+    triesLeft--;
+  } while (
+    triesLeft > 0 &&
+    (target.filter((b) => b).length < minOn || target.filter((b) => b).length > maxOn)
+  );
+
+  // Initial pattern — guarantee it doesn't already match
+  let initial: boolean[] = [];
+  do {
+    initial = Array.from({ length: N }, () => rng() < 0.5);
+  } while (initial.every((v, idx) => v === target[idx]));
+
+  objects.push(
+    makeDoor(
+      base,
+      i,
+      isLast,
+      layout,
+      "The door's lock is wired to the wall switches. Find the right combination.",
+    ),
+  );
+  objects.push(makeWallDeco(base, rng, i, layout));
+
+  // Switches across the back wall — distribute evenly
+  const switchY = layout.WALL_TOP + 50;
+  const totalW = 800;
+  const stepX = totalW / N;
+  const startX = 60;
+  for (let k = 0; k < N; k++) {
+    objects.push({
+      id: `${roomId}_sw${k}`,
+      name: `sw${k}`,
+      prompt: `${base.switchPrompt}, ${OBJ_STYLE}`,
+      x: Math.round(startX + k * stepX),
+      y: switchY,
+      width: 68,
+      height: 100,
+      collidable: false,
+      interactable: true,
+      removeBackground: true,
+      kind: "switch",
+      symbol: String(k + 1),
+      initialOn: initial[k],
+      targetOn: target[k],
+      puzzle: "switches",
+      description: `Switch #${k + 1}. Click to toggle.`,
+    });
+  }
+
+  const cluePattern = target
+    .map((on, idx) => `${idx + 1}:${on ? "ON" : "OFF"}`)
+    .join("  ");
+  objects.push({
+    id: `${roomId}_clue`,
+    name: "clue",
+    prompt: `${base.cluePropPrompt}, ${OBJ_STYLE}`,
+    x: randInt(rng, 290, 380),
+    y: layout.FLOOR_BOT - 120,
+    width: 110,
+    height: 120,
+    collidable: true,
+    interactable: true,
+    removeBackground: true,
+    kind: "switch_clue",
+    symbol: cluePattern,
+    puzzle: "switches",
+    description: `A diagram. It shows which of the ${N} switches must be ON to unlock the door:\n\n${cluePattern}`,
+  });
+
+  return [
+    objects,
+    `Find the clue prop, then set the ${N} wall switches to the pattern it shows.`,
+  ];
 }
