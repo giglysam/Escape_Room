@@ -10,6 +10,8 @@
   --ok: #4ade80;
   --border: rgba(255, 255, 255, 0.08);
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --hud-h: 68px;
+  --inv-h: 96px;
   font-family:
     "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     Arial, sans-serif;
@@ -29,6 +31,9 @@ body,
   color: var(--fg);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button {
@@ -44,15 +49,19 @@ button {
   transition:
     transform 0.08s ease,
     box-shadow 0.15s ease,
-    background 0.15s ease;
+    background 0.15s ease,
+    border-color 0.15s ease;
 }
 button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 6px 18px rgba(124, 92, 255, 0.25);
   border-color: rgba(124, 92, 255, 0.5);
 }
+button:active:not(:disabled) {
+  transform: translateY(0);
+}
 button:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 button.primary {
@@ -91,10 +100,12 @@ textarea:focus {
   padding: 16px;
 }
 
-/* ---------- Menu screen ---------- */
+/* ==============================================================
+ * Menu screen
+ * ============================================================== */
 .menu {
   width: min(720px, 100%);
-  background: linear-gradient(180deg, rgba(20, 20, 36, 0.9), rgba(10, 10, 20, 0.9));
+  background: linear-gradient(180deg, rgba(20, 20, 36, 0.92), rgba(10, 10, 20, 0.92));
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 32px;
@@ -103,12 +114,13 @@ textarea:focus {
 }
 .menu h1 {
   margin: 0 0 4px;
-  font-size: 36px;
+  font-size: clamp(28px, 5vw, 42px);
   letter-spacing: -0.02em;
   background: linear-gradient(120deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  font-weight: 800;
 }
 .menu .tagline {
   color: var(--muted);
@@ -148,7 +160,9 @@ textarea:focus {
   line-height: 1.5;
 }
 
-/* ---------- Loading screen ---------- */
+/* ==============================================================
+ * Loading screen
+ * ============================================================== */
 .loading {
   width: min(720px, 100%);
   background: linear-gradient(180deg, rgba(20, 20, 36, 0.9), rgba(10, 10, 20, 0.9));
@@ -204,7 +218,9 @@ textarea:focus {
   color: var(--muted);
 }
 
-/* ---------- Game screen ---------- */
+/* ==============================================================
+ * Game stage
+ * ============================================================== */
 .game-wrap {
   position: relative;
   width: 100%;
@@ -218,70 +234,198 @@ textarea:focus {
   border-radius: 14px;
   box-shadow: var(--shadow);
   max-width: 100%;
-  max-height: 100%;
+  max-height: calc(100vh - var(--hud-h) - var(--inv-h) - 24px);
+  width: min(100%, 1280px);
   cursor: pointer;
   image-rendering: auto;
+  display: block;
 }
-.hud {
+
+/* ==============================================================
+ * Top HUD bar (CSScape-inspired)
+ * ============================================================== */
+.hud-top {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  right: 16px;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  height: var(--hud-h);
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  pointer-events: none;
-}
-.hud .panel {
-  pointer-events: auto;
-  background: rgba(7, 7, 13, 0.7);
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: linear-gradient(180deg, rgba(7, 7, 13, 0.85), rgba(7, 7, 13, 0.65));
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-size: 13px;
+  border-radius: 12px;
   backdrop-filter: blur(6px);
+  z-index: 20;
+  pointer-events: auto;
 }
-.hud .panel.title {
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-.hud .inventory {
+.hud-left {
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
 }
-.hud .inv-chip {
+.hud-title {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  font-size: 16px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud-sub {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+}
+.hud-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
   background: rgba(124, 92, 255, 0.18);
   border: 1px solid rgba(124, 92, 255, 0.4);
   color: var(--fg);
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  cursor: pointer;
-  transition:
-    background 0.12s ease,
-    transform 0.08s ease,
-    border-color 0.12s ease;
-  font-family: inherit;
+  font-weight: 600;
+  font-size: 11px;
+  white-space: nowrap;
 }
-.hud .inv-chip:hover {
-  background: rgba(124, 92, 255, 0.32);
-  border-color: rgba(124, 92, 255, 0.8);
-  transform: translateY(-1px);
+.hud-mission {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
-.hud .quit-btn {
-  pointer-events: auto;
+.hud-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
-.hud .hud-col {
+.hud-timer {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-.hud .hud-col.right {
   align-items: flex-end;
+  gap: 0;
+  padding: 2px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+}
+.hud-timer-label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+.hud-timer-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent-2);
+  line-height: 1.1;
+}
+.hud-timer.low .hud-timer-value {
+  color: var(--danger);
+  animation: pulseTimer 0.8s ease-in-out infinite;
+}
+@keyframes pulseTimer {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.icon-btn {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 10px;
+  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-/* ---------- Modal / dialogs ---------- */
+/* ==============================================================
+ * Bottom inventory bar (CSScape-style item slots)
+ * ============================================================== */
+.inv-bar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  height: var(--inv-h);
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  background: linear-gradient(180deg, rgba(7, 7, 13, 0.65), rgba(7, 7, 13, 0.85));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  backdrop-filter: blur(6px);
+  z-index: 20;
+  overflow-x: auto;
+}
+.inv-slot {
+  flex: 1 1 0;
+  min-width: 78px;
+  height: 78px;
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: linear-gradient(180deg, #14141f 0%, #0c0c14 100%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--muted);
+  transition:
+    transform 0.08s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+.inv-slot.filled {
+  color: var(--fg);
+  border-color: rgba(124, 92, 255, 0.4);
+  background: linear-gradient(180deg, rgba(124, 92, 255, 0.15) 0%, #11111c 100%);
+}
+.inv-slot.filled:hover {
+  transform: translateY(-2px);
+  border-color: rgba(124, 92, 255, 0.9);
+  box-shadow: 0 8px 18px rgba(124, 92, 255, 0.4);
+}
+.inv-slot-icon {
+  font-size: 30px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+}
+.inv-slot-label {
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+  text-align: center;
+}
+.inv-slot-empty-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+/* ==============================================================
+ * Modal / dialogs (CSScape-style popovers)
+ * ============================================================== */
 .modal-backdrop {
   position: absolute;
   inset: 0;
@@ -291,24 +435,37 @@ textarea:focus {
   justify-content: center;
   z-index: 30;
   padding: 16px;
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(3px);
+  animation: fadeIn 0.18s ease both;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 .modal {
   background: linear-gradient(180deg, #14141f 0%, #0c0c14 100%);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 22px;
-  width: min(460px, 100%);
+  width: min(480px, 100%);
   box-shadow: var(--shadow);
+  animation: popIn 0.2s ease both;
+}
+@keyframes popIn {
+  from { transform: translateY(8px) scale(0.98); opacity: 0; }
+  to   { transform: translateY(0) scale(1); opacity: 1; }
 }
 .modal h3 {
   margin: 0 0 8px;
   font-size: 18px;
 }
 .modal p {
-  color: var(--muted);
+  color: var(--fg);
   line-height: 1.55;
   white-space: pre-wrap;
+}
+.modal p.muted-p {
+  color: var(--muted);
 }
 .modal .actions {
   display: flex;
@@ -370,9 +527,12 @@ textarea:focus {
   letter-spacing: 0.06em;
 }
 
+/* ==============================================================
+ * Toasts + win/lose
+ * ============================================================== */
 .toast {
   position: absolute;
-  bottom: 24px;
+  bottom: calc(var(--inv-h) + 24px);
   left: 50%;
   transform: translateX(-50%);
   background: rgba(7, 7, 13, 0.92);
@@ -383,6 +543,8 @@ textarea:focus {
   z-index: 40;
   pointer-events: none;
   animation: pop 0.25s ease both;
+  max-width: 80%;
+  text-align: center;
 }
 @keyframes pop {
   from {
@@ -402,7 +564,7 @@ textarea:focus {
   align-items: center;
   justify-content: center;
   background: radial-gradient(circle at 50% 40%, rgba(22, 225, 197, 0.25), transparent 60%),
-    rgba(7, 7, 13, 0.85);
+    rgba(7, 7, 13, 0.9);
   z-index: 50;
 }
 .win-screen .card {
@@ -411,7 +573,7 @@ textarea:focus {
   max-width: 560px;
 }
 .win-screen h1 {
-  font-size: 48px;
+  font-size: clamp(36px, 8vw, 56px);
   background: linear-gradient(120deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
@@ -432,42 +594,29 @@ textarea:focus {
   color: transparent;
 }
 
-/* ---------- Objective + timer in HUD ---------- */
-.hud .panel.objective {
-  max-width: 440px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+/* ==============================================================
+ * Spinner
+ * ============================================================== */
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--accent-2);
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -3px;
+  margin-right: 6px;
 }
-.hud .obj-label {
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  color: var(--muted);
-}
-.hud .timer-panel {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  min-width: 110px;
-}
-.hud .timer-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--accent-2);
-}
-.hud .timer-panel.low .timer-value {
-  color: var(--danger);
-  animation: pulseTimer 0.8s ease-in-out infinite;
-}
-@keyframes pulseTimer {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-/* ---------- Briefing screen ---------- */
+/* ==============================================================
+ * Briefing screen
+ * ============================================================== */
 .menu.briefing {
   width: min(640px, 100%);
   max-height: 92vh;
@@ -503,145 +652,55 @@ textarea:focus {
 }
 
 /* ==============================================================
- * Touch / mobile controls
+ * Mobile / small screens
  * ============================================================== */
-.touch-ui {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 25;
-  display: none; /* shown only on coarse-pointer / small viewports */
-}
-.touch-dpad {
-  position: absolute;
-  left: 22px;
-  bottom: 22px;
-  width: 130px;
-  height: 130px;
-  border-radius: 50%;
-  background: rgba(7, 7, 13, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(4px);
-  pointer-events: auto;
-  touch-action: none;
-}
-.touch-stick {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  background: linear-gradient(180deg, rgba(124, 92, 255, 0.85), rgba(22, 225, 197, 0.85));
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
-  transition: transform 0.05s linear;
-}
-.touch-action {
-  position: absolute;
-  right: 22px;
-  bottom: 38px;
-  width: 88px;
-  height: 88px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #0a0a14;
-  font-size: 26px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  border: none;
-  pointer-events: auto;
-  box-shadow: 0 8px 24px rgba(124, 92, 255, 0.45);
-  touch-action: none;
-}
-.touch-action:active {
-  transform: scale(0.95);
-}
-
-/* Show touch controls on mobile / coarse-pointer devices */
-@media (pointer: coarse), (max-width: 720px) {
-  .touch-ui {
-    display: block;
+@media (max-width: 720px) {
+  :root {
+    --hud-h: 56px;
+    --inv-h: 84px;
   }
-  .hud .panel.objective {
-    display: none; /* save vertical space on phones */
-  }
-  .hud {
-    top: 8px;
-    left: 8px;
-    right: 8px;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .hud .hud-col,
-  .hud .hud-col.right {
-    align-items: stretch;
+  .hud-top {
+    padding: 0 10px;
     flex-direction: row;
-    flex-wrap: wrap;
-    gap: 6px;
+    align-items: center;
   }
-  .hud .panel,
-  .hud .timer-panel {
-    font-size: 12px;
-    padding: 6px 10px;
+  .hud-title {
+    font-size: 13px;
   }
-  .hud .timer-value {
+  .hud-mission {
+    display: none;
+  }
+  .hud-timer-value {
     font-size: 18px;
+  }
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+  .inv-slot {
+    min-width: 60px;
+    height: 64px;
+  }
+  .inv-slot-icon {
+    font-size: 22px;
+  }
+  .inv-slot-label {
+    font-size: 8px;
   }
 }
 
 @media (max-width: 480px) {
-  .touch-dpad {
-    width: 110px;
-    height: 110px;
-    left: 12px;
-    bottom: 12px;
-  }
-  .touch-stick {
-    width: 48px;
-    height: 48px;
-  }
-  .touch-action {
-    width: 76px;
-    height: 76px;
-    right: 12px;
-    bottom: 22px;
-    font-size: 22px;
-  }
-  .menu,
-  .briefing-block {
+  .menu, .loading, .briefing-block {
     padding: 16px;
   }
   .menu h1 {
-    font-size: 26px;
+    font-size: 24px;
   }
   .modal {
     padding: 16px;
   }
-}
-
-/* Allow the HUD itself to receive pointer events where needed (fix
- * earlier bug where the bare layout was eating clicks). */
-.hud .hud-col,
-.hud .hud-col.right {
-  pointer-events: auto;
-}
-
-/* Spinner for menu/loading */
-.spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  border-top-color: var(--accent-2);
-  border-radius: 50%;
-  display: inline-block;
-  animation: spin 0.8s linear infinite;
-  vertical-align: -3px;
-  margin-right: 6px;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
+  .inv-slot {
+    min-width: 56px;
   }
 }

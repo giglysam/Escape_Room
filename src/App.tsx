@@ -167,7 +167,7 @@ export default function App() {
               kind: "info",
               object: obj,
               message:
-                "The sequence locks in. A heavy thunk echoes — the door is unlocked. Walk to it and open.",
+                "The sequence locks in. A heavy thunk echoes — the door is unlocked. Click it to open.",
             });
           } else if (r === "correct") {
             const progress = engine.getSequenceProgress();
@@ -187,7 +187,7 @@ export default function App() {
           if (engine.isDoorUnlocked()) {
             setTimeout(
               () =>
-                showToast("You hear the door's lock disengage. Open it."),
+                showToast("You hear the door's lock disengage. Click the door to open."),
               350,
             );
           }
@@ -282,8 +282,6 @@ export default function App() {
           <Hud
             plan={plan}
             currentRoomId={currentRoomId}
-            inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
-            invRev={inventoryRev}
             secondsLeft={secondsLeft}
             muted={muted}
             onToggleMute={() => {
@@ -299,7 +297,11 @@ export default function App() {
               setModal(null);
               setToast(null);
             }}
-            onInventoryClick={(itemId) => {
+          />
+          <InventoryBar
+            inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
+            invRev={inventoryRev}
+            onClick={(itemId) => {
               const desc = describeItem(itemId, plan);
               setModal({
                 kind: "info",
@@ -345,12 +347,6 @@ export default function App() {
                   showToast("That doesn't fit here.");
                 }
               }}
-            />
-          )}
-          {phase === "playing" && (
-            <TouchControls
-              onMove={(dx, dy) => engineRef.current?.setTouchMove(dx, dy)}
-              onInteract={() => engineRef.current?.touchInteract()}
             />
           )}
           {toast && <div className="toast">{toast}</div>}
@@ -457,8 +453,8 @@ function MenuScreen(props: {
       </div>
 
       <p className="hint">
-        Controls: <b>WASD</b> or <b>arrow keys</b> to move · <b>E</b> / <b>Space</b> /
-        <b> click</b> to interact · solve riddles, find codes, escape each room.
+        <b>Click any object</b> to investigate it. Pick up offerings, toggle switches,
+        read murals, place items on pedestals, escape every room before the timer hits zero.
       </p>
       <p className="hint">
         First load takes ~30–60s while AI generates backgrounds and props. Assets are cached
@@ -511,169 +507,102 @@ function LoadingScreen({
 function Hud({
   plan,
   currentRoomId,
-  inventory,
-  invRev,
   secondsLeft,
   muted,
   onQuit,
-  onInventoryClick,
   onToggleMute,
 }: {
   plan: GamePlan;
   currentRoomId: string;
-  inventory: string[];
-  invRev: number;
   secondsLeft: number;
   muted: boolean;
   onQuit: () => void;
-  onInventoryClick: (itemId: string) => void;
   onToggleMute: () => void;
 }) {
   const room = plan.rooms.find((r) => r.id === currentRoomId);
-  void invRev;
   const lowTime = secondsLeft <= 60;
+  const roomNumber = plan.rooms.findIndex((r) => r.id === currentRoomId) + 1;
   return (
-    <div className="hud">
-      <div className="hud-col">
-        <div className="panel title">{plan.title}</div>
-        <div className="panel">
-          {room?.name ?? ""} · Room {(plan.rooms.findIndex((r) => r.id === currentRoomId) + 1)}/
-          {plan.rooms.length}
-        </div>
-        <div className="panel objective" title="Mission">
-          <span className="obj-label">MISSION</span>
-          <span>{plan.mission}</span>
+    <div className="hud-top">
+      <div className="hud-left">
+        <div className="hud-title">{plan.title}</div>
+        <div className="hud-sub">
+          <span className="hud-pill">
+            Room {roomNumber}/{plan.rooms.length}
+          </span>
+          <span className="hud-mission">{room?.name ?? ""} · {plan.mission}</span>
         </div>
       </div>
-      <div className="hud-col right">
-        <div className={`panel timer-panel ${lowTime ? "low" : ""}`}>
-          <span className="obj-label">TIME LEFT</span>
-          <span className="timer-value">{formatTime(secondsLeft)}</span>
+      <div className="hud-right">
+        <div className={`hud-timer ${lowTime ? "low" : ""}`}>
+          <span className="hud-timer-label">TIME</span>
+          <span className="hud-timer-value">{formatTime(secondsLeft)}</span>
         </div>
-        <div className="panel">
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>INVENTORY</div>
-          <div className="inventory">
-            {inventory.length === 0 && (
-              <span style={{ color: "var(--muted)", fontSize: 12 }}>empty</span>
-            )}
-            {inventory.map((it) => (
-              <button
-                key={it}
-                className="inv-chip"
-                onClick={() => onInventoryClick(it)}
-                title="Click to inspect"
-              >
-                {prettyItemName(it)}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 6, pointerEvents: "auto" }}>
-          <button className="quit-btn" onClick={onToggleMute} title={muted ? "Unmute" : "Mute"}>
-            {muted ? "Unmute" : "Mute"}
-          </button>
-          <button className="quit-btn" onClick={onQuit}>
-            Quit
-          </button>
-        </div>
+        <button className="icon-btn" onClick={onToggleMute} title={muted ? "Unmute" : "Mute"} aria-label="Toggle sound">
+          {muted ? "🔇" : "🔊"}
+        </button>
+        <button className="icon-btn" onClick={onQuit} title="Quit to menu" aria-label="Quit">
+          ✕
+        </button>
       </div>
     </div>
   );
 }
 
-function TouchControls({
-  onMove,
-  onInteract,
+/**
+ * CSScape-style fixed bottom inventory bar. Always-visible row of slot
+ * tiles. Empty slots show as faint placeholders. Tap a held item to
+ * inspect it.
+ */
+function InventoryBar({
+  inventory,
+  invRev,
+  onClick,
+  capacity = 8,
 }: {
-  onMove: (dx: number, dy: number) => void;
-  onInteract: () => void;
+  inventory: string[];
+  invRev: number;
+  onClick: (itemId: string) => void;
+  capacity?: number;
 }) {
-  const padRef = useRef<HTMLDivElement>(null);
-  const stickRef = useRef<HTMLDivElement>(null);
-  const activeTouchId = useRef<number | null>(null);
-
-  // The d-pad is a fully analog joystick: the visible circle is the
-  // bounding region; finger position inside it maps to (dx, dy) in
-  // [-1, 1].
-  const onTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    if (activeTouchId.current !== null) return;
-    const t = e.changedTouches[0];
-    if (!t) return;
-    activeTouchId.current = t.identifier;
-    update(t.clientX, t.clientY);
-  };
-  const onTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i]!;
-      if (t.identifier === activeTouchId.current) {
-        update(t.clientX, t.clientY);
-        return;
-      }
-    }
-  };
-  const onTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i]!;
-      if (t.identifier === activeTouchId.current) {
-        activeTouchId.current = null;
-        if (stickRef.current)
-          stickRef.current.style.transform = "translate(-50%, -50%)";
-        onMove(0, 0);
-        return;
-      }
-    }
-  };
-  const update = (cx: number, cy: number) => {
-    const pad = padRef.current;
-    if (!pad) return;
-    const r = pad.getBoundingClientRect();
-    const ox = r.left + r.width / 2;
-    const oy = r.top + r.height / 2;
-    const radius = r.width / 2;
-    let dx = (cx - ox) / radius;
-    let dy = (cy - oy) / radius;
-    const len = Math.hypot(dx, dy);
-    if (len > 1) {
-      dx /= len;
-      dy /= len;
-    }
-    if (stickRef.current) {
-      const sx = dx * radius * 0.7;
-      const sy = dy * radius * 0.7;
-      stickRef.current.style.transform = `translate(calc(-50% + ${sx}px), calc(-50% + ${sy}px))`;
-    }
-    onMove(dx, dy);
-  };
-
+  void invRev;
+  const slots = Array.from({ length: Math.max(capacity, inventory.length) }, (_, i) => inventory[i] ?? null);
   return (
-    <div className="touch-ui">
-      <div
-        ref={padRef}
-        className="touch-dpad"
-        onTouchStart={onTouchStart}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-        onTouchCancel={onTouchEnd}
-      >
-        <div ref={stickRef} className="touch-stick" />
-      </div>
-      <button
-        className="touch-action"
-        onClick={onInteract}
-        onTouchStart={(e) => {
-          e.preventDefault();
-          onInteract();
-        }}
-        aria-label="Interact"
-      >
-        E
-      </button>
+    <div className="inv-bar" role="toolbar" aria-label="Inventory">
+      {slots.map((id, i) => (
+        <button
+          key={id ?? `empty-${i}`}
+          className={`inv-slot ${id ? "filled" : "empty"}`}
+          onClick={() => id && onClick(id)}
+          disabled={!id}
+          title={id ? prettyItemName(id) : "Empty slot"}
+          aria-label={id ? prettyItemName(id) : "Empty slot"}
+        >
+          {id ? (
+            <>
+              <div className="inv-slot-icon" aria-hidden="true">
+                {itemEmoji(id)}
+              </div>
+              <div className="inv-slot-label">{prettyItemName(id)}</div>
+            </>
+          ) : (
+            <div className="inv-slot-empty-dot" />
+          )}
+        </button>
+      ))}
     </div>
   );
 }
+
+function itemEmoji(id: string): string {
+  if (id.startsWith("key_")) return "🗝️";
+  if (id.startsWith("code_")) return "📜";
+  // Items collected from the world ("roomN_itemK") get a generic crystal
+  // emoji so the slot never looks empty.
+  if (/^room\d+_item\d+$/.test(id)) return "💎";
+  return "📦";
+}
+
 
 function BriefingScreen({
   plan,
