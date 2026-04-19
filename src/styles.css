@@ -10,6 +10,8 @@
   --ok: #4ade80;
   --border: rgba(255, 255, 255, 0.08);
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --hud-h: 68px;
+  --inv-w: 220px;
   font-family:
     "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     Arial, sans-serif;
@@ -29,6 +31,9 @@ body,
   color: var(--fg);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button {
@@ -44,15 +49,19 @@ button {
   transition:
     transform 0.08s ease,
     box-shadow 0.15s ease,
-    background 0.15s ease;
+    background 0.15s ease,
+    border-color 0.15s ease;
 }
 button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 6px 18px rgba(124, 92, 255, 0.25);
   border-color: rgba(124, 92, 255, 0.5);
 }
+button:active:not(:disabled) {
+  transform: translateY(0);
+}
 button:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 button.primary {
@@ -91,10 +100,12 @@ textarea:focus {
   padding: 16px;
 }
 
-/* ---------- Menu screen ---------- */
+/* ==============================================================
+ * Menu screen
+ * ============================================================== */
 .menu {
   width: min(720px, 100%);
-  background: linear-gradient(180deg, rgba(20, 20, 36, 0.9), rgba(10, 10, 20, 0.9));
+  background: linear-gradient(180deg, rgba(20, 20, 36, 0.92), rgba(10, 10, 20, 0.92));
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 32px;
@@ -103,12 +114,13 @@ textarea:focus {
 }
 .menu h1 {
   margin: 0 0 4px;
-  font-size: 36px;
+  font-size: clamp(28px, 5vw, 42px);
   letter-spacing: -0.02em;
   background: linear-gradient(120deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  font-weight: 800;
 }
 .menu .tagline {
   color: var(--muted);
@@ -148,7 +160,9 @@ textarea:focus {
   line-height: 1.5;
 }
 
-/* ---------- Loading screen ---------- */
+/* ==============================================================
+ * Loading screen
+ * ============================================================== */
 .loading {
   width: min(720px, 100%);
   background: linear-gradient(180deg, rgba(20, 20, 36, 0.9), rgba(10, 10, 20, 0.9));
@@ -204,84 +218,293 @@ textarea:focus {
   color: var(--muted);
 }
 
-/* ---------- Game screen ---------- */
+/* ==============================================================
+ * Game stage
+ * ============================================================== */
 .game-wrap {
   position: relative;
   width: 100%;
   height: 100%;
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding-top: calc(var(--hud-h) + 16px);
+  padding-bottom: 12px;
+}
+.game-stage {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 12px;
+  min-height: 0;
+  padding: 0 12px;
+}
+.canvas-wrap {
+  flex: 1 1 auto;
+  display: flex;
   align-items: center;
   justify-content: center;
+  min-width: 0;
+  min-height: 0;
 }
 .game-canvas {
   background: #000;
   border-radius: 14px;
   box-shadow: var(--shadow);
-  max-width: 100%;
-  max-height: 100%;
   cursor: pointer;
   image-rendering: auto;
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  max-width: calc((100vh - var(--hud-h) - 32px) * (1024 / 640));
+  aspect-ratio: 1024 / 640;
 }
-.hud {
+
+/* ==============================================================
+ * Top HUD bar (CSScape-inspired)
+ * ============================================================== */
+.hud-top {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  right: 16px;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  height: var(--hud-h);
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  pointer-events: none;
-}
-.hud .panel {
-  pointer-events: auto;
-  background: rgba(7, 7, 13, 0.7);
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: linear-gradient(180deg, rgba(7, 7, 13, 0.85), rgba(7, 7, 13, 0.65));
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-size: 13px;
+  border-radius: 12px;
   backdrop-filter: blur(6px);
+  z-index: 20;
+  pointer-events: auto;
 }
-.hud .panel.title {
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-.hud .inventory {
+.hud-left {
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
 }
-.hud .inv-chip {
+.hud-title {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  font-size: 16px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud-sub {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+}
+.hud-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
   background: rgba(124, 92, 255, 0.18);
   border: 1px solid rgba(124, 92, 255, 0.4);
   color: var(--fg);
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  cursor: pointer;
-  transition:
-    background 0.12s ease,
-    transform 0.08s ease,
-    border-color 0.12s ease;
-  font-family: inherit;
+  font-weight: 600;
+  font-size: 11px;
+  white-space: nowrap;
 }
-.hud .inv-chip:hover {
-  background: rgba(124, 92, 255, 0.32);
-  border-color: rgba(124, 92, 255, 0.8);
-  transform: translateY(-1px);
+.hud-mission {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
-.hud .quit-btn {
-  pointer-events: auto;
+.hud-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
-.hud .hud-col {
+.hud-timer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0;
+  padding: 2px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+}
+.hud-timer-label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+.hud-timer-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent-2);
+  line-height: 1.1;
+}
+.hud-timer.low .hud-timer-value {
+  color: var(--danger);
+  animation: pulseTimer 0.8s ease-in-out infinite;
+}
+@keyframes pulseTimer {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.icon-btn {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 10px;
+  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ==============================================================
+ * Right-side vertical inventory sidebar (Room Escape Maker style)
+ * ============================================================== */
+.inv-side {
+  flex: 0 0 var(--inv-w);
+  width: var(--inv-w);
+  background: linear-gradient(180deg, rgba(20, 20, 36, 0.85), rgba(7, 7, 13, 0.85));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  backdrop-filter: blur(6px);
+  overflow: hidden;
 }
-.hud .hud-col.right {
-  align-items: flex-end;
+.inv-side-title {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.inv-side-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(124, 92, 255, 0.25);
+  border: 1px solid rgba(124, 92, 255, 0.5);
+  color: var(--fg);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0;
+}
+.inv-side-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.inv-side-list::-webkit-scrollbar {
+  width: 6px;
+}
+.inv-side-list::-webkit-scrollbar-thumb {
+  background: rgba(124, 92, 255, 0.4);
+  border-radius: 3px;
+}
+.inv-side-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 12px 8px;
+  text-align: center;
+  font-style: italic;
+}
+.inv-side-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #14141f 0%, #0c0c14 100%);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  transition:
+    transform 0.08s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+.inv-side-item:hover {
+  transform: translateX(-2px);
+  border-color: rgba(124, 92, 255, 0.9);
+  box-shadow: 0 6px 16px rgba(124, 92, 255, 0.35);
+  background: linear-gradient(180deg, rgba(124, 92, 255, 0.18) 0%, #11111c 100%);
+}
+.inv-side-icon {
+  font-size: 24px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+  flex: 0 0 28px;
+  text-align: center;
+}
+.inv-side-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* ---------- Modal / dialogs ---------- */
+/* ==============================================================
+ * Cursor-following hover tooltip (REM style)
+ * ============================================================== */
+.hover-tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 60;
+  transform: translate(14px, -130%);
+  background: rgba(7, 7, 13, 0.95);
+  color: var(--fg);
+  border: 1px solid rgba(124, 92, 255, 0.5);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  animation: tipFade 0.12s ease both;
+}
+@keyframes tipFade {
+  from { opacity: 0; transform: translate(14px, -125%); }
+  to   { opacity: 1; transform: translate(14px, -130%); }
+}
+
+/* ==============================================================
+ * Modal / dialogs (CSScape-style popovers)
+ * ============================================================== */
 .modal-backdrop {
   position: absolute;
   inset: 0;
@@ -291,24 +514,37 @@ textarea:focus {
   justify-content: center;
   z-index: 30;
   padding: 16px;
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(3px);
+  animation: fadeIn 0.18s ease both;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 .modal {
   background: linear-gradient(180deg, #14141f 0%, #0c0c14 100%);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 22px;
-  width: min(460px, 100%);
+  width: min(480px, 100%);
   box-shadow: var(--shadow);
+  animation: popIn 0.2s ease both;
+}
+@keyframes popIn {
+  from { transform: translateY(8px) scale(0.98); opacity: 0; }
+  to   { transform: translateY(0) scale(1); opacity: 1; }
 }
 .modal h3 {
   margin: 0 0 8px;
   font-size: 18px;
 }
 .modal p {
-  color: var(--muted);
+  color: var(--fg);
   line-height: 1.55;
   white-space: pre-wrap;
+}
+.modal p.muted-p {
+  color: var(--muted);
 }
 .modal .actions {
   display: flex;
@@ -370,6 +606,9 @@ textarea:focus {
   letter-spacing: 0.06em;
 }
 
+/* ==============================================================
+ * Toasts + win/lose
+ * ============================================================== */
 .toast {
   position: absolute;
   bottom: 24px;
@@ -383,6 +622,8 @@ textarea:focus {
   z-index: 40;
   pointer-events: none;
   animation: pop 0.25s ease both;
+  max-width: 80%;
+  text-align: center;
 }
 @keyframes pop {
   from {
@@ -402,7 +643,7 @@ textarea:focus {
   align-items: center;
   justify-content: center;
   background: radial-gradient(circle at 50% 40%, rgba(22, 225, 197, 0.25), transparent 60%),
-    rgba(7, 7, 13, 0.85);
+    rgba(7, 7, 13, 0.9);
   z-index: 50;
 }
 .win-screen .card {
@@ -411,7 +652,7 @@ textarea:focus {
   max-width: 560px;
 }
 .win-screen h1 {
-  font-size: 48px;
+  font-size: clamp(36px, 8vw, 56px);
   background: linear-gradient(120deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
@@ -432,42 +673,29 @@ textarea:focus {
   color: transparent;
 }
 
-/* ---------- Objective + timer in HUD ---------- */
-.hud .panel.objective {
-  max-width: 440px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+/* ==============================================================
+ * Spinner
+ * ============================================================== */
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--accent-2);
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -3px;
+  margin-right: 6px;
 }
-.hud .obj-label {
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  color: var(--muted);
-}
-.hud .timer-panel {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  min-width: 110px;
-}
-.hud .timer-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--accent-2);
-}
-.hud .timer-panel.low .timer-value {
-  color: var(--danger);
-  animation: pulseTimer 0.8s ease-in-out infinite;
-}
-@keyframes pulseTimer {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-/* ---------- Briefing screen ---------- */
+/* ==============================================================
+ * Briefing screen
+ * ============================================================== */
 .menu.briefing {
   width: min(640px, 100%);
   max-height: 92vh;
@@ -502,20 +730,84 @@ textarea:focus {
   margin-top: 4px;
 }
 
-/* Spinner for menu/loading */
-.spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  border-top-color: var(--accent-2);
-  border-radius: 50%;
-  display: inline-block;
-  animation: spin 0.8s linear infinite;
-  vertical-align: -3px;
-  margin-right: 6px;
+/* ==============================================================
+ * Mobile / small screens
+ * ============================================================== */
+@media (max-width: 720px) {
+  :root {
+    --hud-h: 56px;
+    --inv-w: 100%;
+  }
+  .hud-top {
+    padding: 0 10px;
+    flex-direction: row;
+    align-items: center;
+  }
+  .hud-title {
+    font-size: 13px;
+  }
+  .hud-mission {
+    display: none;
+  }
+  .hud-timer-value {
+    font-size: 18px;
+  }
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+  .game-stage {
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 8px;
+  }
+  .inv-side {
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: 110px;
+    padding: 8px;
+  }
+  .inv-side-title {
+    padding: 0 4px 6px;
+    font-size: 11px;
+  }
+  .inv-side-list {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 6px;
+  }
+  .inv-side-item {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+  }
+  .inv-side-empty {
+    padding: 6px;
+  }
+  .game-canvas {
+    max-width: 100%;
+  }
+  .hover-tooltip {
+    display: none;
+  }
 }
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
+
+@media (max-width: 480px) {
+  .menu, .loading, .briefing-block {
+    padding: 16px;
+  }
+  .menu h1 {
+    font-size: 24px;
+  }
+  .modal {
+    padding: 16px;
+  }
+}
+
+/* Hide the cursor tooltip on coarse-pointer (touch) devices */
+@media (pointer: coarse) {
+  .hover-tooltip {
+    display: none;
   }
 }
