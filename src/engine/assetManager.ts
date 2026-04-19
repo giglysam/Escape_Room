@@ -43,15 +43,19 @@ function cacheSet(key: string, value: string) {
 /**
  * Call our serverless /api/generate-image endpoint to fetch a base64 data URL.
  * Returns the dataUrl on success, throws on failure.
+ *
+ * `sessionId` is forwarded so the proxy uses a fresh upstream session/UA per
+ * call. This dodges per-IP rate limits when we fire multiple gens in parallel.
  */
 async function generateImage(
   prompt: string,
   generatorType: string,
+  sessionId: string,
 ): Promise<string> {
   const r = await fetch("/api/generate-image", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, generatorType }),
+    headers: { "Content-Type": "application/json", "X-Session-Id": sessionId },
+    body: JSON.stringify({ prompt, generatorType, sessionId }),
   });
   if (!r.ok) {
     let detail = "";
@@ -72,11 +76,22 @@ async function generateImage(
 /**
  * Generate (or load from cache) a single image with retries.
  */
+function newSessionId(): string {
+  // Random per-call session id — the serverless proxy uses this to seed a
+  // brand-new upstream session and rotate User-Agent / Accept-Language /
+  // sec-ch-ua headers, so concurrent calls don't share a fingerprint.
+  return (
+    Date.now().toString(36) +
+    "-" +
+    Math.random().toString(36).slice(2, 10)
+  );
+}
+
 async function getOrGenerate(
   cacheKey: string,
   prompt: string,
   generatorType: string,
-  retries = 2,
+  retries = 3,
 ): Promise<string> {
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
@@ -84,15 +99,40 @@ async function getOrGenerate(
   let lastErr: unknown;
   for (let i = 0; i <= retries; i++) {
     try {
-      const dataUrl = await generateImage(prompt, generatorType);
+      // Fresh session id every attempt → fresh fingerprint every retry.
+      const dataUrl = await generateImage(prompt, generatorType, newSessionId());
       cacheSet(cacheKey, dataUrl);
       return dataUrl;
     } catch (e) {
       lastErr = e;
-      await new Promise((res) => setTimeout(res, 600 * Math.pow(2, i)));
+      // Jittered backoff, only on retry; first miss is immediate.
+      const delay = 400 * Math.pow(2, i) + Math.floor(Math.random() * 250);
+      await new Promise((res) => setTimeout(res, delay));
     }
   }
   throw lastErr ?? new Error("generation failed");
+}
+
+/** Tiny concurrency limiter: run up to `n` async jobs in parallel. */
+async function pMap<T, R>(
+  items: T[],
+  n: number,
+  worker: (item: T, idx: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const runners: Promise<void>[] = [];
+  const run = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i]!, i);
+    }
+  };
+  const concurrency = Math.max(1, Math.min(n, items.length));
+  for (let k = 0; k < concurrency; k++) runners.push(run());
+  await Promise.all(runners);
+  return results;
 }
 
 /**
@@ -129,21 +169,28 @@ function placeholder(
  * - Objects: generated with generatorType "architecture" (sharp product shots),
  *   then if `removeBackground` is true, run client-side chroma key + crop.
  */
+/** Maximum simultaneous in-flight generation requests. Chosen to be small
+ * enough to dodge per-IP throttling but large enough to massively shorten the
+ * loading screen vs serial. */
+const GEN_CONCURRENCY = 5;
+
 export async function loadPlanAssets(
   plan: GamePlan,
   onProgress: ProgressCallback,
 ): Promise<AssetSet> {
-  const bgs: Array<[string, string]> = []; // [roomId, prompt]
-  const objs: Array<[string, string, RoomObject]> = []; // [roomId, prompt, obj]
+  type Job =
+    | { kind: "bg"; roomId: string; prompt: string }
+    | { kind: "obj"; roomId: string; prompt: string; obj: RoomObject };
 
+  const jobs: Job[] = [];
   for (const room of plan.rooms) {
-    bgs.push([room.id, room.background_prompt]);
+    jobs.push({ kind: "bg", roomId: room.id, prompt: room.background_prompt });
     for (const obj of room.objects) {
-      objs.push([room.id, obj.prompt, obj]);
+      jobs.push({ kind: "obj", roomId: room.id, prompt: obj.prompt, obj });
     }
   }
 
-  const total = bgs.length + objs.length;
+  const total = jobs.length;
   let done = 0;
   const emit = (message: string, level: ProgressEvent["level"]) =>
     onProgress({ message, level, done, total });
@@ -153,58 +200,57 @@ export async function loadPlanAssets(
     objects: new Map(),
   };
 
-  // ---- Backgrounds ----
-  for (const [roomId, prompt] of bgs) {
-    emit(`Generating background for ${roomId}…`, "info");
-    try {
-      const cacheKey = `bg:${roomId}:${prompt}`;
-      const dataUrl = await getOrGenerate(cacheKey, prompt, "architecture");
-      const img = await loadImage(dataUrl);
-      set.backgrounds.set(roomId, {
-        source: img,
-        width: img.naturalWidth,
-        height: img.naturalHeight,
-      });
-      done++;
-      emit(`✓ Background ${roomId}`, "ok");
-    } catch (e) {
-      done++;
-      const msg = e instanceof Error ? e.message : String(e);
-      emit(`! Background ${roomId} failed (${msg}). Using fallback.`, "err");
-      set.backgrounds.set(roomId, placeholder(`(missing bg) ${roomId}`, 1024, 640, "#1a1a2c"));
-    }
-  }
+  emit(`Starting ${total} parallel generations (×${GEN_CONCURRENCY} at a time)…`, "info");
 
-  // ---- Objects ----
-  for (const [roomId, prompt, obj] of objs) {
-    emit(`Generating ${roomId}/${obj.name}…`, "info");
+  await pMap(jobs, GEN_CONCURRENCY, async (job) => {
+    const label = job.kind === "bg" ? `bg/${job.roomId}` : `${job.roomId}/${job.obj.name}`;
     try {
-      const cacheKey = `obj:${roomId}:${obj.id}:${prompt}`;
-      const dataUrl = await getOrGenerate(cacheKey, prompt, "architecture");
-      const img = await loadImage(dataUrl);
-      let drawable: CanvasImageSource = img;
-      let dw = img.naturalWidth;
-      let dh = img.naturalHeight;
-      if (obj.removeBackground) {
-        const cut = removeBackground(img, { tolerance: 42, maxSize: 512 });
-        const trimmed = trimTransparent(cut);
-        drawable = trimmed;
-        dw = trimmed.width;
-        dh = trimmed.height;
+      if (job.kind === "bg") {
+        const cacheKey = `bg:${job.roomId}:${job.prompt}`;
+        const dataUrl = await getOrGenerate(cacheKey, job.prompt, "architecture");
+        const img = await loadImage(dataUrl);
+        set.backgrounds.set(job.roomId, {
+          source: img,
+          width: img.naturalWidth,
+          height: img.naturalHeight,
+        });
+      } else {
+        const obj = job.obj;
+        const cacheKey = `obj:${job.roomId}:${obj.id}:${job.prompt}`;
+        const dataUrl = await getOrGenerate(cacheKey, job.prompt, "architecture");
+        const img = await loadImage(dataUrl);
+        let drawable: CanvasImageSource = img;
+        let dw = img.naturalWidth;
+        let dh = img.naturalHeight;
+        if (obj.removeBackground) {
+          const cut = removeBackground(img, { tolerance: 50, maxSize: 512 });
+          const trimmed = trimTransparent(cut);
+          drawable = trimmed;
+          dw = trimmed.width;
+          dh = trimmed.height;
+        }
+        set.objects.set(`${job.roomId}:${obj.id}`, { source: drawable, width: dw, height: dh });
       }
-      set.objects.set(`${roomId}:${obj.id}`, { source: drawable, width: dw, height: dh });
       done++;
-      emit(`✓ ${roomId}/${obj.name}`, "ok");
+      emit(`✓ ${label}`, "ok");
     } catch (e) {
       done++;
       const msg = e instanceof Error ? e.message : String(e);
-      emit(`! ${roomId}/${obj.name} failed (${msg}). Using fallback.`, "err");
-      set.objects.set(
-        `${roomId}:${obj.id}`,
-        placeholder(obj.name, obj.width, obj.height, "#2a2a40"),
-      );
+      emit(`! ${label} failed (${msg}). Using fallback.`, "err");
+      if (job.kind === "bg") {
+        set.backgrounds.set(
+          job.roomId,
+          placeholder(`(missing bg) ${job.roomId}`, 1024, 640, "#1a1a2c"),
+        );
+      } else {
+        const obj = job.obj;
+        set.objects.set(
+          `${job.roomId}:${obj.id}`,
+          placeholder(obj.name, obj.width, obj.height, "#2a2a40"),
+        );
+      }
     }
-  }
+  });
 
   emit(`All assets ready (${done}/${total}).`, "ok");
   return set;
