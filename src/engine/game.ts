@@ -2,7 +2,12 @@ import type { GamePlan, RoomObject, RoomPlan } from "../shared/plan";
 import { PLAN_CANVAS } from "../shared/plan";
 import type { AssetSet, RenderableAsset } from "./assetManager";
 import { fitContain } from "./imageUtils";
-import { drawPlayer, type PlayerState } from "./player";
+import {
+  CHARACTER_H,
+  CHARACTER_W,
+  getCharacterFrames,
+  type Facing,
+} from "./character";
 import {
   playBigSuccess,
   playClick,
@@ -19,6 +24,12 @@ import {
 export interface InteractionRequest {
   object: RoomObject;
   room: RoomPlan;
+  /**
+   * The placed sprite that was clicked — useful when the UI wants to
+   * "zoom in" on the prop image before opening a puzzle.
+   */
+  asset: RenderableAsset;
+  drawRect: { x: number; y: number; w: number; h: number };
 }
 
 export interface GameCallbacks {
@@ -28,6 +39,19 @@ export interface GameCallbacks {
   onWin: () => void;
   onLose: () => void;
   onTimeTick: (secondsLeft: number) => void;
+  /**
+   * Fires whenever the prop under the cursor changes. `null` means the
+   * cursor isn't over any interactable. `clientX`/`clientY` are the raw
+   * page-space coords of the pointer so the React tooltip can follow.
+   */
+  onHover: (
+    info: {
+      label: string;
+      kind: RoomObject["kind"];
+      clientX: number;
+      clientY: number;
+    } | null,
+  ) => void;
 }
 
 export interface GameState {
@@ -48,22 +72,22 @@ interface PlacedObject {
   obj: RoomObject;
   /** On-screen render rect (may be aspect-corrected within the plan rect). */
   drawRect: { x: number; y: number; w: number; h: number };
-  /** Hitbox for collision/interaction (uses planned rect for stability). */
+  /** Hitbox for clicks (uses the planned rect for stability). */
   hitRect: { x: number; y: number; w: number; h: number };
-  /** Solid box used for player movement collision (smaller, on the floor). */
-  solidRect: { x: number; y: number; w: number; h: number };
   asset: RenderableAsset;
 }
 
 const W = PLAN_CANVAS.width;
 const H = PLAN_CANVAS.height;
-const PLAYER_W = 60;
-const PLAYER_H = 110;
-const PLAYER_SPEED = 220; // px / sec
-const FLOOR_TOP = PLAN_CANVAS.floorTop;
-const FLOOR_BOTTOM = H - 24;
-const INTERACT_RADIUS = 70;
 
+/**
+ * CSScape-style escape-room engine.
+ *
+ * No walking, no player avatar. The view is a fixed first-person camera
+ * looking at the room's back wall and floor. Every prop is a clickable
+ * hotspot. Click → either toggle a switch / advance a sequence in place,
+ * or open a "zoom-in" investigation modal handled by the UI.
+ */
 export class GameEngine {
   private ctx: CanvasRenderingContext2D;
   private canvas: HTMLCanvasElement;
@@ -75,14 +99,20 @@ export class GameEngine {
   private placed: PlacedObject[] = [];
   private currentRoom!: RoomPlan;
 
-  private player: PlayerState;
-  private keys = new Set<string>();
-  private lastT = 0;
   private rafId = 0;
   private running = false;
 
   private hoveredObject: PlacedObject | null = null;
-  private interactPrompt: PlacedObject | null = null;
+
+  // ---------- character (4-facing walking sprite) ----------
+  private charX: number;
+  private charY: number;
+  private charTargetX: number | null = null;
+  /** Pending interaction to fire when the character arrives at its target. */
+  private pendingInteract: PlacedObject | null = null;
+  private charFacing: Facing = "front";
+  private charPhase = 0; // walk-cycle accumulator
+  private lastTickT = 0;
 
   private secondsLeft: number;
   private lastSecondTick = 0;
@@ -113,16 +143,12 @@ export class GameEngine {
       pedestalSlots: new Map(),
       consumedItems: new Set(),
     };
-    this.player = {
-      x: 80,
-      y: H - PLAYER_H - 24,
-      width: PLAYER_W,
-      height: PLAYER_H,
-      facing: "right",
-      walkPhase: 0,
-      moving: false,
-    };
     this.secondsLeft = Math.max(60, plan.timeLimitSec ?? 420);
+    // Character starts standing in the middle-front of the room.
+    this.charX = W / 2 - CHARACTER_W / 2;
+    this.charY = H - 30 - CHARACTER_H;
+    // Pre-build sprite frames so the first draw has them ready.
+    void getCharacterFrames();
     this.loadRoom(0);
   }
 
@@ -131,8 +157,7 @@ export class GameEngine {
   start() {
     if (this.running) return;
     this.running = true;
-    this.lastT = performance.now();
-    this.lastSecondTick = this.lastT;
+    this.lastSecondTick = performance.now();
     this.bindInput();
     startAmbient({ intensity: 0.6 });
     this.cb.onTimeTick(this.secondsLeft);
@@ -158,6 +183,11 @@ export class GameEngine {
     return this.currentRoom;
   }
 
+  /** Returns the asset for an object id in the current room (for UI zoom views). */
+  getAssetFor(objectId: string): RenderableAsset | null {
+    return this.assets.objects.get(`${this.currentRoom.id}:${objectId}`) ?? null;
+  }
+
   /** Player picked something up / a flag was set / inventory changed. */
   giveItem(id: string) {
     this.state.inventory.add(id);
@@ -180,7 +210,6 @@ export class GameEngine {
     }
   }
 
-  /** Toggle a switch by id and return new state. */
   toggleSwitch(switchId: string): boolean {
     const cur = this.state.switchStates.get(switchId) ?? false;
     const next = !cur;
@@ -194,7 +223,6 @@ export class GameEngine {
     return this.state.switchStates.get(switchId) ?? false;
   }
 
-  /** Push a sequence button. Returns 'correct' | 'wrong' | 'complete'. */
   pressSequenceButton(buttonObj: RoomObject): "correct" | "wrong" | "complete" {
     const roomId = this.currentRoom.id;
     const expectedIdx = this.state.sequenceProgress.get(roomId) ?? 0;
@@ -220,7 +248,6 @@ export class GameEngine {
     return this.state.sequenceProgress.get(this.currentRoom.id) ?? 0;
   }
 
-  /** Place an item from inventory onto a pedestal. Returns true if accepted. */
   depositOnPedestal(pedestal: RoomObject, itemId: string): "accepted" | "rejected" | "complete" {
     if (!pedestal.acceptsItems?.includes(itemId)) {
       playFail();
@@ -242,7 +269,6 @@ export class GameEngine {
     return "accepted";
   }
 
-  /** Player picked up a world item. */
   collectItem(itemId: string) {
     if (this.state.inventory.has(itemId)) return;
     this.state.inventory.add(itemId);
@@ -253,12 +279,10 @@ export class GameEngine {
     return this.state.pedestalSlots.get(pedestalId) ?? new Set();
   }
 
-  /** Has the player won the current room's puzzle? */
   isDoorUnlocked(): boolean {
     return this.hasFlag(`door_${this.currentRoom.id}_unlocked`);
   }
 
-  /** Check whether the switch combination matches the target pattern. */
   private checkSwitchPuzzle() {
     const switches = this.currentRoom.objects.filter((o) => o.kind === "switch");
     if (switches.length === 0) return;
@@ -269,7 +293,6 @@ export class GameEngine {
     if (allCorrect) this.unlockDoor();
   }
 
-  /** Move to next room, or trigger win if at exit. */
   advanceRoom() {
     const idx = this.state.currentRoomIndex + 1;
     if (idx >= this.plan.rooms.length) {
@@ -281,7 +304,6 @@ export class GameEngine {
     this.cb.onRoomChange(this.currentRoom);
   }
 
-  /** Add seconds to the timer (e.g. on bonus). */
   addSeconds(s: number) {
     this.secondsLeft = Math.max(0, this.secondsLeft + s);
     this.cb.onTimeTick(this.secondsLeft);
@@ -294,17 +316,14 @@ export class GameEngine {
     this.currentRoom = this.plan.rooms[idx]!;
     this.placed = [];
 
-    // Seed switch initial states for this room (only once)
     for (const obj of this.currentRoom.objects) {
       if (obj.kind === "switch" && !this.state.switchStates.has(obj.id)) {
         this.state.switchStates.set(obj.id, !!obj.initialOn);
       }
     }
-    // Reset sequence progress for the room when entering
     this.state.sequenceProgress.set(this.currentRoom.id, 0);
 
     for (const obj of this.currentRoom.objects) {
-      // Hide already-consumed items (placed on a pedestal)
       if (obj.kind === "item" && this.state.consumedItems.has(obj.id)) continue;
       const asset = this.assets.objects.get(`${this.currentRoom.id}:${obj.id}`);
       if (!asset) continue;
@@ -318,60 +337,30 @@ export class GameEngine {
       };
       const hitRect = { x: drawRect.x, y: drawRect.y, w: drawRect.w, h: drawRect.h };
 
-      // Solid rect = the bottom 40% of the drawn sprite, used as a floor obstacle.
-      // Avoids the player getting stuck on tall thin sprites.
-      const solidH = Math.max(20, Math.round(drawRect.h * 0.4));
-      const solidRect = obj.collidable
-        ? {
-            x: drawRect.x + 6,
-            y: drawRect.y + drawRect.h - solidH,
-            w: Math.max(20, drawRect.w - 12),
-            h: solidH,
-          }
-        : { x: 0, y: 0, w: 0, h: 0 };
-
-      this.placed.push({ obj, drawRect, hitRect, solidRect, asset });
+      this.placed.push({ obj, drawRect, hitRect, asset });
     }
-
-    // Reset player to left side of the room (or right if coming back, but we
-    // don't model that here).
-    this.player.x = 80;
-    this.player.y = H - PLAYER_H - 24;
-    this.player.facing = "right";
   }
 
   // ---------- input ----------
 
   private bindInput() {
-    window.addEventListener("keydown", this.onKeyDown);
-    window.addEventListener("keyup", this.onKeyUp);
     this.canvas.addEventListener("mousemove", this.onMouseMove);
     this.canvas.addEventListener("mousedown", this.onMouseDown);
+    this.canvas.addEventListener("mouseleave", this.onMouseLeave);
+    this.canvas.addEventListener("touchstart", this.onTouchStart, { passive: false });
   }
   private unbindInput() {
-    window.removeEventListener("keydown", this.onKeyDown);
-    window.removeEventListener("keyup", this.onKeyUp);
     this.canvas.removeEventListener("mousemove", this.onMouseMove);
     this.canvas.removeEventListener("mousedown", this.onMouseDown);
+    this.canvas.removeEventListener("mouseleave", this.onMouseLeave);
+    this.canvas.removeEventListener("touchstart", this.onTouchStart);
   }
 
-  private onKeyDown = (e: KeyboardEvent) => {
-    // Allow typing into modal inputs without intercepting
-    const target = e.target as HTMLElement | null;
-    if (
-      target &&
-      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
-    ) {
-      return;
+  private onMouseLeave = () => {
+    if (this.hoveredObject) {
+      this.hoveredObject = null;
+      this.cb.onHover(null);
     }
-    this.keys.add(e.key);
-    if (e.key === " " || e.key === "Enter" || e.key === "e" || e.key === "E") {
-      e.preventDefault();
-      this.tryInteract();
-    }
-  };
-  private onKeyUp = (e: KeyboardEvent) => {
-    this.keys.delete(e.key);
   };
 
   private getCanvasPoint(clientX: number, clientY: number): { x: number; y: number } {
@@ -383,35 +372,60 @@ export class GameEngine {
 
   private onMouseMove = (e: MouseEvent) => {
     const p = this.getCanvasPoint(e.clientX, e.clientY);
-    this.hoveredObject = this.findObjectAt(p.x, p.y);
-    this.canvas.style.cursor = this.hoveredObject?.obj.interactable ? "pointer" : "default";
+    const next = this.findObjectAt(p.x, p.y);
+    const prev = this.hoveredObject;
+    this.hoveredObject = next;
+    this.canvas.style.cursor = next?.obj.interactable ? "pointer" : "default";
+
+    if (next?.obj.interactable) {
+      this.cb.onHover({
+        label: labelFor(next.obj),
+        kind: next.obj.kind,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      });
+    } else if (prev?.obj.interactable) {
+      this.cb.onHover(null);
+    }
   };
 
   private onMouseDown = (e: MouseEvent) => {
     if (e.button !== 0) return;
     const p = this.getCanvasPoint(e.clientX, e.clientY);
-    const obj = this.findObjectAt(p.x, p.y);
-    if (obj && obj.obj.interactable) {
-      // Walk-to-and-interact: just trigger immediately if close enough,
-      // otherwise show a toast hint.
-      const px = this.player.x + this.player.width / 2;
-      const py = this.player.y + this.player.height / 2;
-      const cx = obj.drawRect.x + obj.drawRect.w / 2;
-      const cy = obj.drawRect.y + obj.drawRect.h / 2;
-      const dist = Math.hypot(px - cx, py - cy);
-      if (dist <= INTERACT_RADIUS + 60) {
-        this.cb.onInteract({ object: obj.obj, room: this.currentRoom });
-      } else {
-        // auto-walk toward it horizontally
-        if (cx < px) this.player.facing = "left";
-        else this.player.facing = "right";
-        this.cb.onToast("Walk closer to interact.");
-      }
+    const hit = this.findObjectAt(p.x, p.y);
+    if (hit && hit.obj.interactable) {
+      this.queueInteract(hit);
     }
   };
 
+  private onTouchStart = (e: TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0]!;
+    const p = this.getCanvasPoint(t.clientX, t.clientY);
+    const hit = this.findObjectAt(p.x, p.y);
+    if (hit && hit.obj.interactable) {
+      e.preventDefault();
+      this.queueInteract(hit);
+    }
+  };
+
+  /**
+   * REM-style click: the character walks horizontally to the prop's
+   * x-position, then the actual interaction fires. Vertical movement
+   * isn't needed — the character stays on the floor band.
+   */
+  private queueInteract(hit: PlacedObject) {
+    const propCx = hit.drawRect.x + hit.drawRect.w / 2;
+    // Standing target: a bit offset from the prop centre so character
+    // doesn't overlap it, and clamped inside the floor band.
+    const targetX = Math.max(20, Math.min(W - CHARACTER_W - 20, propCx - CHARACTER_W / 2));
+    this.charTargetX = targetX;
+    this.pendingInteract = hit;
+    // Update facing immediately so the player sees the turn.
+    this.charFacing = targetX < this.charX ? "left" : "right";
+  }
+
   private findObjectAt(x: number, y: number): PlacedObject | null {
-    // top-down z order: later in list is drawn on top — iterate reverse
     for (let i = this.placed.length - 1; i >= 0; i--) {
       const p = this.placed[i]!;
       if (
@@ -426,19 +440,14 @@ export class GameEngine {
     return null;
   }
 
-  private tryInteract() {
-    if (!this.interactPrompt) return;
-    this.cb.onInteract({ object: this.interactPrompt.obj, room: this.currentRoom });
-  }
-
   // ---------- update / draw ----------
 
   private tick = (now: number) => {
     if (!this.running) return;
-    const dt = Math.min(0.05, (now - this.lastT) / 1000);
-    this.lastT = now;
+    const dt = this.lastTickT ? Math.min(0.06, (now - this.lastTickT) / 1000) : 0;
+    this.lastTickT = now;
+    this.updateCharacter(dt);
 
-    // Timer — count down once per real second
     if (!this.gameEnded && now - this.lastSecondTick >= 1000) {
       this.lastSecondTick = now;
       this.secondsLeft = Math.max(0, this.secondsLeft - 1);
@@ -464,94 +473,15 @@ export class GameEngine {
       }
     }
 
-    this.update(dt);
     this.draw();
     this.rafId = requestAnimationFrame(this.tick);
   };
-
-  private update(dt: number) {
-    let dx = 0;
-    let dy = 0;
-    if (this.keys.has("ArrowLeft") || this.keys.has("a") || this.keys.has("A")) dx -= 1;
-    if (this.keys.has("ArrowRight") || this.keys.has("d") || this.keys.has("D")) dx += 1;
-    if (this.keys.has("ArrowUp") || this.keys.has("w") || this.keys.has("W")) dy -= 1;
-    if (this.keys.has("ArrowDown") || this.keys.has("s") || this.keys.has("S")) dy += 1;
-
-    if (dx !== 0 && dy !== 0) {
-      const inv = 1 / Math.SQRT2;
-      dx *= inv;
-      dy *= inv;
-    }
-
-    const moving = dx !== 0 || dy !== 0;
-    this.player.moving = moving;
-    if (moving) {
-      this.player.walkPhase = (this.player.walkPhase + dt * 2) % 1;
-      if (dx < 0) this.player.facing = "left";
-      else if (dx > 0) this.player.facing = "right";
-    }
-
-    const newX = this.player.x + dx * PLAYER_SPEED * dt;
-    const newY = this.player.y + dy * PLAYER_SPEED * dt;
-
-    // try X then Y so we slide along walls
-    if (!this.collides(newX, this.player.y)) this.player.x = newX;
-    if (!this.collides(this.player.x, newY)) this.player.y = newY;
-
-    // clamp to floor band
-    if (this.player.y + this.player.height > FLOOR_BOTTOM)
-      this.player.y = FLOOR_BOTTOM - this.player.height;
-    if (this.player.y + this.player.height < FLOOR_TOP + 10)
-      this.player.y = FLOOR_TOP + 10 - this.player.height;
-    if (this.player.x < 0) this.player.x = 0;
-    if (this.player.x + this.player.width > W) this.player.x = W - this.player.width;
-
-    // determine interact prompt: nearest interactable object within radius
-    let bestDist = INTERACT_RADIUS + 30;
-    let best: PlacedObject | null = null;
-    const px = this.player.x + this.player.width / 2;
-    const py = this.player.y + this.player.height / 2;
-    for (const p of this.placed) {
-      if (!p.obj.interactable) continue;
-      const cx = p.drawRect.x + p.drawRect.w / 2;
-      const cy = p.drawRect.y + p.drawRect.h / 2;
-      const d = Math.hypot(px - cx, py - cy);
-      if (d < bestDist) {
-        bestDist = d;
-        best = p;
-      }
-    }
-    this.interactPrompt = best;
-  }
-
-  private collides(x: number, y: number): boolean {
-    // collision uses just the player feet box (lower 40%)
-    const feetH = Math.round(this.player.height * 0.4);
-    const fx = x + 8;
-    const fy = y + this.player.height - feetH;
-    const fw = this.player.width - 16;
-    const fh = feetH;
-
-    for (const p of this.placed) {
-      const r = p.solidRect;
-      if (r.w === 0) continue;
-      if (
-        fx < r.x + r.w &&
-        fx + fw > r.x &&
-        fy < r.y + r.h &&
-        fy + fh > r.y
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
 
   private draw() {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, W, H);
 
-    // background — fill by aspect-cover
+    // Background — fill by aspect-cover
     const bg = this.assets.backgrounds.get(this.currentRoom.id);
     if (bg) {
       const scale = Math.max(W / bg.width, H / bg.height);
@@ -565,33 +495,20 @@ export class GameEngine {
       ctx.fillRect(0, 0, W, H);
     }
 
-    // ambient overlay
-    ctx.fillStyle = `${this.currentRoom.ambient_color}55`;
+    // Subtle ambient overlay
+    ctx.fillStyle = `${this.currentRoom.ambient_color}33`;
     ctx.fillRect(0, 0, W, H);
 
-    // gradient floor-fade
-    const grad = ctx.createLinearGradient(0, FLOOR_TOP - 80, 0, H);
-    grad.addColorStop(0, "rgba(0,0,0,0)");
-    grad.addColorStop(1, "rgba(0,0,0,0.45)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, FLOOR_TOP - 80, W, H - (FLOOR_TOP - 80));
-
-    // sort objects so things further back (smaller y+h) draw first
+    // Sort objects so things further back (smaller y+h) draw first
     const sorted = [...this.placed].sort(
       (a, b) => a.drawRect.y + a.drawRect.h - (b.drawRect.y + b.drawRect.h),
     );
 
-    // Draw objects, with player interleaved by depth.
-    let playerDrawn = false;
-    const playerBase = this.player.y + this.player.height;
     for (const p of sorted) {
-      const base = p.drawRect.y + p.drawRect.h;
-      if (!playerDrawn && playerBase < base) {
-        drawPlayer(ctx, this.player);
-        playerDrawn = true;
-      }
-      // soft shadow under object on the floor
-      if (p.obj.collidable) {
+      // Soft contact shadow on the floor for floor-standing props
+      const yCenter = p.drawRect.y + p.drawRect.h * 0.5;
+      const onFloor = yCenter > PLAN_CANVAS.floorTop;
+      if (onFloor) {
         ctx.fillStyle = "rgba(0,0,0,0.35)";
         const shY = p.drawRect.y + p.drawRect.h - 4;
         ctx.beginPath();
@@ -606,37 +523,32 @@ export class GameEngine {
         );
         ctx.fill();
       }
+
       ctx.drawImage(p.asset.source, p.drawRect.x, p.drawRect.y, p.drawRect.w, p.drawRect.h);
+      this.tintPropToScene(p);
       this.drawObjectOverlay(p);
 
-      // hover highlight
+      // Hover highlight — subtle outer glow instead of dashed border
       if (this.hoveredObject === p && p.obj.interactable) {
         ctx.save();
-        ctx.strokeStyle = "rgba(124, 92, 255, 0.9)";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([6, 4]);
-        ctx.strokeRect(p.drawRect.x - 2, p.drawRect.y - 2, p.drawRect.w + 4, p.drawRect.h + 4);
+        ctx.shadowColor = "rgba(124, 92, 255, 0.95)";
+        ctx.shadowBlur = 18;
+        ctx.strokeStyle = "rgba(124, 92, 255, 0)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(p.drawRect.x, p.drawRect.y, p.drawRect.w, p.drawRect.h);
+        // Re-draw the asset with a cyan tint to glow it
+        ctx.globalAlpha = 0.25;
+        ctx.fillStyle = "rgba(124, 92, 255, 0.35)";
+        ctx.beginPath();
+        ctx.rect(p.drawRect.x, p.drawRect.y, p.drawRect.w, p.drawRect.h);
+        ctx.clip();
+        ctx.fillRect(p.drawRect.x, p.drawRect.y, p.drawRect.w, p.drawRect.h);
         ctx.restore();
       }
     }
-    if (!playerDrawn) drawPlayer(ctx, this.player);
 
-    // Interact prompt
-    if (this.interactPrompt) {
-      const p = this.interactPrompt;
-      const cx = p.drawRect.x + p.drawRect.w / 2;
-      const cy = p.drawRect.y - 14;
-      const text = `[E] ${labelFor(p.obj)}`;
-      ctx.font = "600 14px Inter, system-ui, sans-serif";
-      const tw = ctx.measureText(text).width + 16;
-      ctx.fillStyle = "rgba(7,7,13,0.9)";
-      this.roundRect(cx - tw / 2, cy - 22, tw, 22, 6);
-      ctx.fill();
-      ctx.fillStyle = "#16e1c5";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(text, cx, cy - 11);
-    }
+    // Character — drawn after all props so it always reads on top
+    this.drawCharacter();
 
     // Vignette
     const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
@@ -645,11 +557,9 @@ export class GameEngine {
     ctx.fillStyle = vg;
     ctx.fillRect(0, 0, W, H);
 
-    // Climax tint — when time is short, throw a pulsing red tint over the
-    // whole scene. The blueprint's "Adrenaline finish": low seconds → louder
-    // visual stress.
+    // Climax red tint
     if (!this.gameEnded && this.secondsLeft <= 60) {
-      const stress = 1 - this.secondsLeft / 60; // 0 at 60s, 1 at 0s
+      const stress = 1 - this.secondsLeft / 60;
       const pulse = (Math.sin(performance.now() / 220) + 1) / 2;
       const alpha = Math.min(0.55, 0.12 + stress * 0.35 + pulse * stress * 0.25);
       ctx.fillStyle = `rgba(255, 32, 50, ${alpha})`;
@@ -658,9 +568,66 @@ export class GameEngine {
   }
 
   /**
-   * Per-object on-canvas overlays — symbols on buttons, ON/OFF chip on switches,
-   * progress bar on pedestals, "open" outline on door once unlocked, etc.
+   * Walks the character toward `charTargetX` along the floor band. When
+   * arrived (within 4 px), fires the queued interaction.
    */
+  private updateCharacter(dt: number) {
+    if (this.charTargetX === null) return;
+    const speed = 320; // px/s
+    const dx = this.charTargetX - this.charX;
+    const adx = Math.abs(dx);
+    if (adx <= 4) {
+      // Arrived → fire the pending interaction.
+      this.charX = this.charTargetX;
+      this.charTargetX = null;
+      this.charFacing = "front";
+      const hit = this.pendingInteract;
+      this.pendingInteract = null;
+      if (hit) {
+        this.cb.onInteract({
+          object: hit.obj,
+          room: this.currentRoom,
+          asset: hit.asset,
+          drawRect: hit.drawRect,
+        });
+      }
+      return;
+    }
+    const step = Math.min(adx, speed * dt);
+    this.charX += Math.sign(dx) * step;
+    this.charFacing = dx < 0 ? "left" : "right";
+    this.charPhase += dt * 6; // ~6 walk frames per second
+  }
+
+  private drawCharacter() {
+    const ctx = this.ctx;
+    const frames = getCharacterFrames();
+    const moving = this.charTargetX !== null;
+    const frameIdx = moving ? Math.floor(this.charPhase) % 2 : 0;
+    const fr = frames[this.charFacing][frameIdx]!;
+    ctx.drawImage(fr, Math.round(this.charX), Math.round(this.charY));
+  }
+
+  private tintPropToScene(p: PlacedObject) {
+    const ctx = this.ctx;
+    const { drawRect: r } = p;
+    if (r.w <= 0 || r.h <= 0) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+    ctx.globalCompositeOperation = "source-atop";
+    ctx.fillStyle = `${this.currentRoom.ambient_color}40`;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    const grd = ctx.createLinearGradient(r.x, r.y, r.x + r.w, r.y + r.h);
+    grd.addColorStop(0, "rgba(255,240,210,0.18)");
+    grd.addColorStop(0.5, "rgba(0,0,0,0)");
+    grd.addColorStop(1, "rgba(0,0,0,0.22)");
+    ctx.fillStyle = grd;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.restore();
+  }
+
   private drawObjectOverlay(p: PlacedObject) {
     const ctx = this.ctx;
     const { obj, drawRect: r } = p;
@@ -682,7 +649,6 @@ export class GameEngine {
     } else if (obj.kind === "switch") {
       const on = this.state.switchStates.get(obj.id) ?? !!obj.initialOn;
       ctx.save();
-      // ON/OFF chip on top
       const chipW = Math.max(34, r.w * 0.7);
       const chipH = 16;
       const chipX = r.x + (r.w - chipW) / 2;
@@ -695,7 +661,6 @@ export class GameEngine {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(on ? "ON" : "OFF", chipX + chipW / 2, chipY + chipH / 2 + 1);
-      // small label inside the switch with its number
       if (obj.symbol) {
         ctx.fillStyle = "rgba(0,0,0,0.55)";
         const cx = r.x + r.w / 2;
@@ -763,22 +728,24 @@ export class GameEngine {
 function labelFor(obj: RoomObject): string {
   switch (obj.kind) {
     case "door":
-      return "Open door";
+      return "Door";
     case "exit":
-      return "Open exit";
+      return "Exit door";
     case "item":
       return "Pick up";
     case "pedestal":
-      return "Place item";
+      return "Pedestal";
     case "sequence_clue":
-      return "Read mural";
+      return "Wall mural";
     case "sequence_button":
-      return `Press ${obj.symbol ?? ""}`.trim();
+      return `Button ${obj.symbol ?? ""}`.trim();
     case "switch":
-      return "Toggle";
+      return `Switch ${obj.symbol ?? ""}`.trim();
     case "switch_clue":
-      return "Inspect clue";
-    default:
+      return "Diagram";
+    case "decoration":
       return "Inspect";
+    default:
+      return obj.name;
   }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { generateProceduralPlan, PLAN_CANVAS, type GamePlan, type RoomObject } from "./shared/plan";
 import { loadPlanAssets, type AssetSet, type ProgressEvent } from "./engine/assetManager";
 import { GameEngine, type InteractionRequest } from "./engine/game";
@@ -29,6 +29,7 @@ export default function App() {
   const [currentRoomId, setCurrentRoomId] = useState<string>("");
   const [secondsLeft, setSecondsLeft] = useState<number>(0);
   const [muted, setMutedState] = useState<boolean>(isMuted());
+  const [hover, setHover] = useState<{ label: string; x: number; y: number } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
@@ -119,6 +120,10 @@ export default function App() {
         setPhase("lost");
       },
       onTimeTick: (s) => setSecondsLeft(s),
+      onHover: (info) => {
+        if (info) setHover({ label: info.label, x: info.clientX, y: info.clientY });
+        else setHover(null);
+      },
     });
     engineRef.current = engine;
     setCurrentRoomId(engine.getCurrentRoom().id);
@@ -139,18 +144,58 @@ export default function App() {
       if (!engine) return;
       const obj = req.object;
 
+      // Chained-room gating: every interactable can declare `requires`,
+      // a flag that must be set before it can be used. If the flag is
+      // missing, show a hint and bail.
+      if (
+        obj.requires &&
+        obj.kind !== "door" &&
+        obj.kind !== "exit" &&
+        !engine.hasFlag(obj.requires) &&
+        !engine.hasItem(obj.requires)
+      ) {
+        showToast("You can't use this yet — something else first.");
+        return;
+      }
+
       switch (obj.kind) {
         // ---------- A) COLLECT & COMBINE ----------
         case "item": {
           if (!obj.gives) return;
-          if (!engine.hasItem(obj.gives)) {
+          if (!engine.hasItem(obj.gives) && !engine.hasFlag(obj.gives)) {
             engine.collectItem(obj.gives);
+            engine.setFlag(obj.gives);
             setInventoryRev((n) => n + 1);
-            showToast(`Picked up an offering. (${engine.getState().inventory.size} carried)`);
+            showToast(`Picked up: ${prettyItemName(obj.gives)}.`);
           }
           return;
         }
         case "pedestal": {
+          // Chained-room mode: if pedestal accepts a single flag-id and we
+          // already have it, consume it inline; otherwise open the modal
+          // for multi-item pedestals (legacy collect rooms).
+          const accepts = obj.acceptsItems ?? [];
+          if (accepts.length === 1 && obj.gives) {
+            const need = accepts[0]!;
+            if (engine.hasItem(need) || engine.hasFlag(need)) {
+              // Consume the inventory item and set the give-flag.
+              if (engine.hasItem(need)) {
+                engine.getState().inventory.delete(need);
+                engine.getState().consumedItems.add(need);
+              }
+              engine.setFlag(obj.gives);
+              if (obj.gives.startsWith("door_")) engine.unlockDoor();
+              setInventoryRev((n) => n + 1);
+              setModal({
+                kind: "info",
+                object: obj,
+                message: "It clicks into place. Something just changed in the room.",
+              });
+              return;
+            }
+            showToast("It needs something you don't have yet.");
+            return;
+          }
           setModal({ kind: "pedestal", object: obj });
           return;
         }
@@ -167,7 +212,7 @@ export default function App() {
               kind: "info",
               object: obj,
               message:
-                "The sequence locks in. A heavy thunk echoes — the door is unlocked. Walk to it and open.",
+                "The sequence locks in. A heavy thunk echoes — the door is unlocked. Click it to open.",
             });
           } else if (r === "correct") {
             const progress = engine.getSequenceProgress();
@@ -184,10 +229,20 @@ export default function App() {
           const next = engine.toggleSwitch(obj.id);
           setInventoryRev((n) => n + 1);
           showToast(`Switch ${obj.symbol ?? ""} → ${next ? "ON" : "OFF"}`);
+          // Chained-room: if this switch's `gives` flag is part of the
+          // chain and the switch is now in its target state, set the
+          // flag so the next step unlocks.
+          if (obj.gives && next === !!obj.targetOn && !engine.hasFlag(obj.gives)) {
+            engine.setFlag(obj.gives);
+            setTimeout(
+              () => showToast("Something in the room just woke up."),
+              250,
+            );
+          }
           if (engine.isDoorUnlocked()) {
             setTimeout(
               () =>
-                showToast("You hear the door's lock disengage. Open it."),
+                showToast("You hear the door's lock disengage. Click the door to open."),
               350,
             );
           }
@@ -269,21 +324,9 @@ export default function App() {
 
       {(phase === "playing" || phase === "won" || phase === "lost") && plan && assets && (
         <div className="game-wrap">
-          <canvas
-            ref={canvasRef}
-            className="game-canvas"
-            width={PLAN_CANVAS.width}
-            height={PLAN_CANVAS.height}
-            style={{
-              aspectRatio: `${PLAN_CANVAS.width} / ${PLAN_CANVAS.height}`,
-              width: "min(100%, 1280px)",
-            }}
-          />
           <Hud
             plan={plan}
             currentRoomId={currentRoomId}
-            inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
-            invRev={inventoryRev}
             secondsLeft={secondsLeft}
             muted={muted}
             onToggleMute={() => {
@@ -299,27 +342,63 @@ export default function App() {
               setModal(null);
               setToast(null);
             }}
-            onInventoryClick={(itemId) => {
-              const desc = describeItem(itemId, plan);
-              setModal({
-                kind: "info",
-                object: {
-                  id: `inv_${itemId}`,
-                  name: itemId,
-                  prompt: "",
-                  x: 0,
-                  y: 0,
-                  width: 0,
-                  height: 0,
-                  collidable: false,
-                  interactable: false,
-                  removeBackground: false,
-                  kind: "decoration",
-                } as RoomObject,
-                message: desc,
-              });
-            }}
           />
+          <div className="game-stage">
+            <div className="canvas-column">
+              <div
+                className="canvas-frame"
+                style={
+                  {
+                    "--wall-color": plan.rooms.find((r) => r.id === currentRoomId)?.ambient_color ?? "#0a0a14",
+                    "--floor-color": darkenHex(
+                      plan.rooms.find((r) => r.id === currentRoomId)?.ambient_color ?? "#0a0a14",
+                      0.55,
+                    ),
+                  } as React.CSSProperties
+                }
+              >
+                <div className="canvas-bg-wall" />
+                <div className="canvas-bg-floor" />
+                <canvas
+                  ref={canvasRef}
+                  className="game-canvas"
+                  width={PLAN_CANVAS.width}
+                  height={PLAN_CANVAS.height}
+                />
+              </div>
+              <GameNavBar
+                roomNumber={plan.rooms.findIndex((r) => r.id === currentRoomId) + 1}
+                totalRooms={plan.rooms.length}
+              />
+            </div>
+            <InventorySidebar
+              inventory={engineRef.current ? Array.from(engineRef.current.getState().inventory) : []}
+              invRev={inventoryRev}
+              onClick={(itemId) => {
+                const desc = describeItem(itemId, plan);
+                setModal({
+                  kind: "info",
+                  object: {
+                    id: `inv_${itemId}`,
+                    name: itemId,
+                    prompt: "",
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                    collidable: false,
+                    interactable: false,
+                    removeBackground: false,
+                    kind: "decoration",
+                  } as RoomObject,
+                  message: desc,
+                });
+              }}
+            />
+          </div>
+          {hover && phase === "playing" && (
+            <HoverTooltip label={hover.label} x={hover.x} y={hover.y} />
+          )}
           {modal && (
             <ModalView
               modal={modal}
@@ -451,8 +530,8 @@ function MenuScreen(props: {
       </div>
 
       <p className="hint">
-        Controls: <b>WASD</b> or <b>arrow keys</b> to move · <b>E</b> / <b>Space</b> /
-        <b> click</b> to interact · solve riddles, find codes, escape each room.
+        <b>Click any object</b> to investigate it. Pick up offerings, toggle switches,
+        read murals, place items on pedestals, escape every room before the timer hits zero.
       </p>
       <p className="hint">
         First load takes ~30–60s while AI generates backgrounds and props. Assets are cached
@@ -505,75 +584,182 @@ function LoadingScreen({
 function Hud({
   plan,
   currentRoomId,
-  inventory,
-  invRev,
   secondsLeft,
   muted,
   onQuit,
-  onInventoryClick,
   onToggleMute,
 }: {
   plan: GamePlan;
   currentRoomId: string;
-  inventory: string[];
-  invRev: number;
   secondsLeft: number;
   muted: boolean;
   onQuit: () => void;
-  onInventoryClick: (itemId: string) => void;
   onToggleMute: () => void;
 }) {
   const room = plan.rooms.find((r) => r.id === currentRoomId);
-  void invRev;
   const lowTime = secondsLeft <= 60;
+  const roomNumber = plan.rooms.findIndex((r) => r.id === currentRoomId) + 1;
   return (
-    <div className="hud">
-      <div className="hud-col">
-        <div className="panel title">{plan.title}</div>
-        <div className="panel">
-          {room?.name ?? ""} · Room {(plan.rooms.findIndex((r) => r.id === currentRoomId) + 1)}/
-          {plan.rooms.length}
-        </div>
-        <div className="panel objective" title="Mission">
-          <span className="obj-label">MISSION</span>
-          <span>{plan.mission}</span>
+    <div className="hud-top">
+      <div className="hud-left">
+        <div className="hud-title">{plan.title}</div>
+        <div className="hud-sub">
+          <span className="hud-pill">
+            Room {roomNumber}/{plan.rooms.length}
+          </span>
+          <span className="hud-mission">{room?.name ?? ""} · {plan.mission}</span>
         </div>
       </div>
-      <div className="hud-col right">
-        <div className={`panel timer-panel ${lowTime ? "low" : ""}`}>
-          <span className="obj-label">TIME LEFT</span>
-          <span className="timer-value">{formatTime(secondsLeft)}</span>
+      <div className="hud-right">
+        <div className={`hud-timer ${lowTime ? "low" : ""}`}>
+          <span className="hud-timer-label">TIME</span>
+          <span className="hud-timer-value">{formatTime(secondsLeft)}</span>
         </div>
-        <div className="panel">
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>INVENTORY</div>
-          <div className="inventory">
-            {inventory.length === 0 && (
-              <span style={{ color: "var(--muted)", fontSize: 12 }}>empty</span>
-            )}
-            {inventory.map((it) => (
-              <button
-                key={it}
-                className="inv-chip"
-                onClick={() => onInventoryClick(it)}
-                title="Click to inspect"
-              >
-                {prettyItemName(it)}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 6, pointerEvents: "auto" }}>
-          <button className="quit-btn" onClick={onToggleMute} title={muted ? "Unmute" : "Mute"}>
-            {muted ? "Unmute" : "Mute"}
-          </button>
-          <button className="quit-btn" onClick={onQuit}>
-            Quit
-          </button>
-        </div>
+        <button className="icon-btn" onClick={onToggleMute} title={muted ? "Unmute" : "Mute"} aria-label="Toggle sound">
+          {muted ? "🔇" : "🔊"}
+        </button>
+        <button className="icon-btn" onClick={onQuit} title="Quit to menu" aria-label="Quit">
+          ✕
+        </button>
       </div>
     </div>
   );
 }
+
+/**
+ * Room Escape Maker-style right-side vertical inventory sidebar.
+ * Shows an "Items" header and a stacked list of held items. Each item is
+ * a card-style button with an icon + label. Empty state shows a quiet
+ * placeholder.
+ */
+function InventorySidebar({
+  inventory,
+  invRev,
+  onClick,
+}: {
+  inventory: string[];
+  invRev: number;
+  onClick: (itemId: string) => void;
+}) {
+  void invRev;
+  return (
+    <aside className="inv-side" aria-label="Inventory">
+      <h2 className="inv-side-title">
+        Items
+        <span className="inv-side-count">{inventory.length}</span>
+      </h2>
+      <ul className="inv-side-list">
+        {inventory.length === 0 && (
+          <li className="inv-side-empty">No items collected yet.</li>
+        )}
+        {inventory.map((id) => (
+          <li key={id}>
+            <button
+              className="inv-side-item"
+              onClick={() => onClick(id)}
+              aria-label={prettyItemName(id)}
+            >
+              <span className="inv-side-icon" aria-hidden="true">
+                {itemEmoji(id)}
+              </span>
+              <span className="inv-side-label">{prettyItemName(id)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </aside>
+  );
+}
+
+/**
+ * Cursor-following tooltip showing the hovered prop's name.
+ * Mirrors REM's `#tooltip-container` UX: the label gently floats above
+ * the cursor and disappears as soon as you leave a hotspot.
+ */
+function HoverTooltip({ label, x, y }: { label: string; x: number; y: number }) {
+  return (
+    <div
+      className="hover-tooltip"
+      style={{
+        left: x,
+        top: y,
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+function itemEmoji(id: string): string {
+  if (id.startsWith("key_")) return "🗝️";
+  if (id.startsWith("code_")) return "📜";
+  // Items collected from the world ("roomN_itemK") get a generic crystal
+  // emoji so the slot never looks empty.
+  if (/^room\d+_item\d+$/.test(id)) return "💎";
+  return "📦";
+}
+
+/**
+ * Bottom navigation bar — Room Escape Maker style.
+ * Mirrors REM's `#game-controls`: Turn Left / Go Left / Room View N / Go
+ * Right / Turn Right. The directional buttons are disabled in our
+ * single-view-per-room model but kept visible so the chrome reads as a
+ * "real" escape-room game.
+ */
+function GameNavBar({
+  roomNumber,
+  totalRooms,
+}: {
+  roomNumber: number;
+  totalRooms: number;
+}) {
+  void totalRooms;
+  return (
+    <nav className="game-nav" aria-label="Room navigation">
+      <button className="nav-arrow disabled" disabled aria-label="Turn Left">
+        <span className="nav-arrow-icon">⏮</span>
+        <span className="nav-arrow-legend">Turn Left</span>
+      </button>
+      <div className="nav-slider">
+        <button className="nav-arrow disabled" disabled aria-label="Go Left">
+          <span className="nav-arrow-icon">◀</span>
+          <span className="nav-arrow-legend">Go Left</span>
+        </button>
+        <div className="nav-view-number">
+          <span>Room View </span>
+          <b>{roomNumber}</b>
+        </div>
+        <button className="nav-arrow disabled" disabled aria-label="Go Right">
+          <span className="nav-arrow-icon">▶</span>
+          <span className="nav-arrow-legend">Go Right</span>
+        </button>
+      </div>
+      <button className="nav-arrow disabled" disabled aria-label="Turn Right">
+        <span className="nav-arrow-icon">⏭</span>
+        <span className="nav-arrow-legend">Turn Right</span>
+      </button>
+    </nav>
+  );
+}
+
+/**
+ * Darken a hex color by `amount` (0..1). Used to derive a floor color
+ * from the room's wall color so the canvas frame mirrors REM's
+ * `#canvas-background-wall` + `#canvas-background-floor` split.
+ */
+function darkenHex(hex: string, amount: number): string {
+  const m = /^#?([a-f\d]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const n = parseInt(m[1]!, 16);
+  let r = (n >> 16) & 0xff;
+  let g = (n >> 8) & 0xff;
+  let b = n & 0xff;
+  r = Math.max(0, Math.round(r * (1 - amount)));
+  g = Math.max(0, Math.round(g * (1 - amount)));
+  b = Math.max(0, Math.round(b * (1 - amount)));
+  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
+}
+
 
 function BriefingScreen({
   plan,

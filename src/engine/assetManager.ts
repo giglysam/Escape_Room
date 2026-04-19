@@ -240,7 +240,7 @@ export async function loadPlanAssets(
       if (job.kind === "bg") {
         set.backgrounds.set(
           job.roomId,
-          placeholder(`(missing bg) ${job.roomId}`, 1024, 640, "#1a1a2c"),
+          placeholder(`(missing bg) ${job.roomId}`, 1280, 720, "#1a1a2c"),
         );
       } else {
         const obj = job.obj;
