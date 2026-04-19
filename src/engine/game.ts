@@ -3,6 +3,12 @@ import { PLAN_CANVAS } from "../shared/plan";
 import type { AssetSet, RenderableAsset } from "./assetManager";
 import { fitContain } from "./imageUtils";
 import {
+  CHARACTER_H,
+  CHARACTER_W,
+  getCharacterFrames,
+  type Facing,
+} from "./character";
+import {
   playBigSuccess,
   playClick,
   playFail,
@@ -98,6 +104,16 @@ export class GameEngine {
 
   private hoveredObject: PlacedObject | null = null;
 
+  // ---------- character (4-facing walking sprite) ----------
+  private charX: number;
+  private charY: number;
+  private charTargetX: number | null = null;
+  /** Pending interaction to fire when the character arrives at its target. */
+  private pendingInteract: PlacedObject | null = null;
+  private charFacing: Facing = "front";
+  private charPhase = 0; // walk-cycle accumulator
+  private lastTickT = 0;
+
   private secondsLeft: number;
   private lastSecondTick = 0;
   private warned60 = false;
@@ -128,6 +144,11 @@ export class GameEngine {
       consumedItems: new Set(),
     };
     this.secondsLeft = Math.max(60, plan.timeLimitSec ?? 420);
+    // Character starts standing in the middle-front of the room.
+    this.charX = W / 2 - CHARACTER_W / 2;
+    this.charY = H - 30 - CHARACTER_H;
+    // Pre-build sprite frames so the first draw has them ready.
+    void getCharacterFrames();
     this.loadRoom(0);
   }
 
@@ -373,12 +394,7 @@ export class GameEngine {
     const p = this.getCanvasPoint(e.clientX, e.clientY);
     const hit = this.findObjectAt(p.x, p.y);
     if (hit && hit.obj.interactable) {
-      this.cb.onInteract({
-        object: hit.obj,
-        room: this.currentRoom,
-        asset: hit.asset,
-        drawRect: hit.drawRect,
-      });
+      this.queueInteract(hit);
     }
   };
 
@@ -389,14 +405,25 @@ export class GameEngine {
     const hit = this.findObjectAt(p.x, p.y);
     if (hit && hit.obj.interactable) {
       e.preventDefault();
-      this.cb.onInteract({
-        object: hit.obj,
-        room: this.currentRoom,
-        asset: hit.asset,
-        drawRect: hit.drawRect,
-      });
+      this.queueInteract(hit);
     }
   };
+
+  /**
+   * REM-style click: the character walks horizontally to the prop's
+   * x-position, then the actual interaction fires. Vertical movement
+   * isn't needed — the character stays on the floor band.
+   */
+  private queueInteract(hit: PlacedObject) {
+    const propCx = hit.drawRect.x + hit.drawRect.w / 2;
+    // Standing target: a bit offset from the prop centre so character
+    // doesn't overlap it, and clamped inside the floor band.
+    const targetX = Math.max(20, Math.min(W - CHARACTER_W - 20, propCx - CHARACTER_W / 2));
+    this.charTargetX = targetX;
+    this.pendingInteract = hit;
+    // Update facing immediately so the player sees the turn.
+    this.charFacing = targetX < this.charX ? "left" : "right";
+  }
 
   private findObjectAt(x: number, y: number): PlacedObject | null {
     for (let i = this.placed.length - 1; i >= 0; i--) {
@@ -417,6 +444,9 @@ export class GameEngine {
 
   private tick = (now: number) => {
     if (!this.running) return;
+    const dt = this.lastTickT ? Math.min(0.06, (now - this.lastTickT) / 1000) : 0;
+    this.lastTickT = now;
+    this.updateCharacter(dt);
 
     if (!this.gameEnded && now - this.lastSecondTick >= 1000) {
       this.lastSecondTick = now;
@@ -517,6 +547,9 @@ export class GameEngine {
       }
     }
 
+    // Character — drawn after all props so it always reads on top
+    this.drawCharacter();
+
     // Vignette
     const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
     vg.addColorStop(0, "rgba(0,0,0,0)");
@@ -532,6 +565,47 @@ export class GameEngine {
       ctx.fillStyle = `rgba(255, 32, 50, ${alpha})`;
       ctx.fillRect(0, 0, W, H);
     }
+  }
+
+  /**
+   * Walks the character toward `charTargetX` along the floor band. When
+   * arrived (within 4 px), fires the queued interaction.
+   */
+  private updateCharacter(dt: number) {
+    if (this.charTargetX === null) return;
+    const speed = 320; // px/s
+    const dx = this.charTargetX - this.charX;
+    const adx = Math.abs(dx);
+    if (adx <= 4) {
+      // Arrived → fire the pending interaction.
+      this.charX = this.charTargetX;
+      this.charTargetX = null;
+      this.charFacing = "front";
+      const hit = this.pendingInteract;
+      this.pendingInteract = null;
+      if (hit) {
+        this.cb.onInteract({
+          object: hit.obj,
+          room: this.currentRoom,
+          asset: hit.asset,
+          drawRect: hit.drawRect,
+        });
+      }
+      return;
+    }
+    const step = Math.min(adx, speed * dt);
+    this.charX += Math.sign(dx) * step;
+    this.charFacing = dx < 0 ? "left" : "right";
+    this.charPhase += dt * 6; // ~6 walk frames per second
+  }
+
+  private drawCharacter() {
+    const ctx = this.ctx;
+    const frames = getCharacterFrames();
+    const moving = this.charTargetX !== null;
+    const frameIdx = moving ? Math.floor(this.charPhase) % 2 : 0;
+    const fr = frames[this.charFacing][frameIdx]!;
+    ctx.drawImage(fr, Math.round(this.charX), Math.round(this.charY));
   }
 
   private tintPropToScene(p: PlacedObject) {

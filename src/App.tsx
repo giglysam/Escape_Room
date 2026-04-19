@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { generateProceduralPlan, PLAN_CANVAS, type GamePlan, type RoomObject } from "./shared/plan";
 import { loadPlanAssets, type AssetSet, type ProgressEvent } from "./engine/assetManager";
 import { GameEngine, type InteractionRequest } from "./engine/game";
@@ -144,18 +144,58 @@ export default function App() {
       if (!engine) return;
       const obj = req.object;
 
+      // Chained-room gating: every interactable can declare `requires`,
+      // a flag that must be set before it can be used. If the flag is
+      // missing, show a hint and bail.
+      if (
+        obj.requires &&
+        obj.kind !== "door" &&
+        obj.kind !== "exit" &&
+        !engine.hasFlag(obj.requires) &&
+        !engine.hasItem(obj.requires)
+      ) {
+        showToast("You can't use this yet — something else first.");
+        return;
+      }
+
       switch (obj.kind) {
         // ---------- A) COLLECT & COMBINE ----------
         case "item": {
           if (!obj.gives) return;
-          if (!engine.hasItem(obj.gives)) {
+          if (!engine.hasItem(obj.gives) && !engine.hasFlag(obj.gives)) {
             engine.collectItem(obj.gives);
+            engine.setFlag(obj.gives);
             setInventoryRev((n) => n + 1);
-            showToast(`Picked up an offering. (${engine.getState().inventory.size} carried)`);
+            showToast(`Picked up: ${prettyItemName(obj.gives)}.`);
           }
           return;
         }
         case "pedestal": {
+          // Chained-room mode: if pedestal accepts a single flag-id and we
+          // already have it, consume it inline; otherwise open the modal
+          // for multi-item pedestals (legacy collect rooms).
+          const accepts = obj.acceptsItems ?? [];
+          if (accepts.length === 1 && obj.gives) {
+            const need = accepts[0]!;
+            if (engine.hasItem(need) || engine.hasFlag(need)) {
+              // Consume the inventory item and set the give-flag.
+              if (engine.hasItem(need)) {
+                engine.getState().inventory.delete(need);
+                engine.getState().consumedItems.add(need);
+              }
+              engine.setFlag(obj.gives);
+              if (obj.gives.startsWith("door_")) engine.unlockDoor();
+              setInventoryRev((n) => n + 1);
+              setModal({
+                kind: "info",
+                object: obj,
+                message: "It clicks into place. Something just changed in the room.",
+              });
+              return;
+            }
+            showToast("It needs something you don't have yet.");
+            return;
+          }
           setModal({ kind: "pedestal", object: obj });
           return;
         }
@@ -189,6 +229,16 @@ export default function App() {
           const next = engine.toggleSwitch(obj.id);
           setInventoryRev((n) => n + 1);
           showToast(`Switch ${obj.symbol ?? ""} → ${next ? "ON" : "OFF"}`);
+          // Chained-room: if this switch's `gives` flag is part of the
+          // chain and the switch is now in its target state, set the
+          // flag so the next step unlocks.
+          if (obj.gives && next === !!obj.targetOn && !engine.hasFlag(obj.gives)) {
+            engine.setFlag(obj.gives);
+            setTimeout(
+              () => showToast("Something in the room just woke up."),
+              250,
+            );
+          }
           if (engine.isDoorUnlocked()) {
             setTimeout(
               () =>
@@ -294,12 +344,31 @@ export default function App() {
             }}
           />
           <div className="game-stage">
-            <div className="canvas-wrap">
-              <canvas
-                ref={canvasRef}
-                className="game-canvas"
-                width={PLAN_CANVAS.width}
-                height={PLAN_CANVAS.height}
+            <div className="canvas-column">
+              <div
+                className="canvas-frame"
+                style={
+                  {
+                    "--wall-color": plan.rooms.find((r) => r.id === currentRoomId)?.ambient_color ?? "#0a0a14",
+                    "--floor-color": darkenHex(
+                      plan.rooms.find((r) => r.id === currentRoomId)?.ambient_color ?? "#0a0a14",
+                      0.55,
+                    ),
+                  } as React.CSSProperties
+                }
+              >
+                <div className="canvas-bg-wall" />
+                <div className="canvas-bg-floor" />
+                <canvas
+                  ref={canvasRef}
+                  className="game-canvas"
+                  width={PLAN_CANVAS.width}
+                  height={PLAN_CANVAS.height}
+                />
+              </div>
+              <GameNavBar
+                roomNumber={plan.rooms.findIndex((r) => r.id === currentRoomId) + 1}
+                totalRooms={plan.rooms.length}
               />
             </div>
             <InventorySidebar
@@ -628,6 +697,67 @@ function itemEmoji(id: string): string {
   // emoji so the slot never looks empty.
   if (/^room\d+_item\d+$/.test(id)) return "💎";
   return "📦";
+}
+
+/**
+ * Bottom navigation bar — Room Escape Maker style.
+ * Mirrors REM's `#game-controls`: Turn Left / Go Left / Room View N / Go
+ * Right / Turn Right. The directional buttons are disabled in our
+ * single-view-per-room model but kept visible so the chrome reads as a
+ * "real" escape-room game.
+ */
+function GameNavBar({
+  roomNumber,
+  totalRooms,
+}: {
+  roomNumber: number;
+  totalRooms: number;
+}) {
+  void totalRooms;
+  return (
+    <nav className="game-nav" aria-label="Room navigation">
+      <button className="nav-arrow disabled" disabled aria-label="Turn Left">
+        <span className="nav-arrow-icon">⏮</span>
+        <span className="nav-arrow-legend">Turn Left</span>
+      </button>
+      <div className="nav-slider">
+        <button className="nav-arrow disabled" disabled aria-label="Go Left">
+          <span className="nav-arrow-icon">◀</span>
+          <span className="nav-arrow-legend">Go Left</span>
+        </button>
+        <div className="nav-view-number">
+          <span>Room View </span>
+          <b>{roomNumber}</b>
+        </div>
+        <button className="nav-arrow disabled" disabled aria-label="Go Right">
+          <span className="nav-arrow-icon">▶</span>
+          <span className="nav-arrow-legend">Go Right</span>
+        </button>
+      </div>
+      <button className="nav-arrow disabled" disabled aria-label="Turn Right">
+        <span className="nav-arrow-icon">⏭</span>
+        <span className="nav-arrow-legend">Turn Right</span>
+      </button>
+    </nav>
+  );
+}
+
+/**
+ * Darken a hex color by `amount` (0..1). Used to derive a floor color
+ * from the room's wall color so the canvas frame mirrors REM's
+ * `#canvas-background-wall` + `#canvas-background-floor` split.
+ */
+function darkenHex(hex: string, amount: number): string {
+  const m = /^#?([a-f\d]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const n = parseInt(m[1]!, 16);
+  let r = (n >> 16) & 0xff;
+  let g = (n >> 8) & 0xff;
+  let b = n & 0xff;
+  r = Math.max(0, Math.round(r * (1 - amount)));
+  g = Math.max(0, Math.round(g * (1 - amount)));
+  b = Math.max(0, Math.round(b * (1 - amount)));
+  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
 }
 
 
