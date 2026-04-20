@@ -100,16 +100,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
     const generatorType = body.generatorType ?? "architecture";
-    const sessionId =
-      body.sessionId ??
-      (req.headers["x-session-id"] as string | undefined) ??
-      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    // **Fresh session + fingerprint on every request** — do not reuse the
+    // client's X-Session-Id for upstream identity (rate limits bind on that).
+    const sessionKey = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}-${Math.random().toString(36).slice(2, 12)}`;
+    const HEADERS = fingerprintHeaders(sessionKey, generatorType);
 
-    const HEADERS = fingerprintHeaders(sessionId, generatorType);
-
-    // Per-session warm-up — fresh "browser" hits the page first
+    // Per-session warm-up — new "browser" hits the page first (same headers)
     try {
-      await fetchWithRetry(`${BASE}/?type=${encodeURIComponent(generatorType)}`, {
+      await fetchWithRetry(`${BASE}/?type=${encodeURIComponent(generatorType)}&_=${encodeURIComponent(sessionKey)}`, {
         method: "GET",
         headers: HEADERS,
       });
@@ -118,13 +116,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const apiResp = await fetchWithRetry(
-      `${BASE}/api/generate`,
+      `${BASE}/api/generate?_=${encodeURIComponent(sessionKey)}`,
       {
         method: "POST",
         headers: HEADERS,
         body: JSON.stringify({
           positivePrompt: prompt,
           generatorType,
+          sessionKey,
         }),
       },
       6,
@@ -150,9 +149,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const fullUrl = rawUrl.startsWith("http") ? rawUrl : new URL(rawUrl, BASE).toString();
 
+    const downloadKey = `${sessionKey}-dl-${Math.random().toString(36).slice(2, 10)}`;
+    const DL_HEADERS = fingerprintHeaders(downloadKey, generatorType);
+
     const imgResp = await fetchWithRetry(fullUrl, {
       method: "GET",
-      headers: { ...HEADERS, Accept: "image/*,*/*;q=0.8" },
+      headers: { ...DL_HEADERS, Accept: "image/*,*/*;q=0.8" },
     });
 
     if (!imgResp.ok) {

@@ -94,6 +94,25 @@ export interface RoomObject {
    * breakable / keyed_lock until it's been opened.
    */
   hiddenUntilFlag?: string;
+  /**
+   * REM-style visibility: show only when **all** of these flags are set
+   * (AND). If omitted but `hiddenUntilFlag` is set, visibility requires that
+   * single flag (same as `visibleWhenAll: [hiddenUntilFlag]`).
+   */
+  visibleWhenAll?: string[];
+  /** Hide (non-interactable) when **any** of these flags is set — e.g. consumed state. */
+  hiddenWhenAny?: string[];
+  /**
+   * Extra flags to set alongside `gives` when this object successfully fires
+   * (pickup, break, switch target, code correct). Lets one action reveal/hide
+   * multiple logical props without new object kinds.
+   */
+  givesFlags?: string[];
+  /**
+   * Draw layer: 0 = back (wall decor), 1 = mid (wall props, door), 2 = front
+   * (floor pickups). Character draws between 1 and 2.
+   */
+  depthLayer?: 0 | 1 | 2;
 
   // ---------------- Inventory item metadata ----------------
   //
@@ -663,6 +682,7 @@ function makeDoor(
     collidable: true,
     interactable: true,
     removeBackground: true,
+    depthLayer: 1,
     kind: isLast ? "exit" : "door",
     requires: `door_room${i}_unlocked`,
     description,
@@ -711,31 +731,90 @@ function snap8(n: number) {
 }
 
 /**
- * Anchor-based stage: wall band vs floor band, 8px grid, door column kept clear.
- * `preset` (0..11) shifts the whole "set" so rooms feel like different layouts.
+ * Six **room map** layouts (different disposition, same puzzle chain).
+ * `preset` (0..11) adds micro-jitter; `jx`/`jy` from spread().
  */
-function buildStageSlots(layout: RoomLayout, preset: number, jx: number, jy: number): StageSlots {
+function buildStageSlots(
+  layout: RoomLayout,
+  mapKind: number,
+  preset: number,
+  jx: number,
+  jy: number,
+): StageSlots {
+  const mk = ((mapKind % 6) + 6) % 6;
   const p = ((preset % 12) + 12) % 12;
-  const wallMid = snap8(layout.WALL_TOP + 104 + (p % 3) * 16 + jy);
-  const floorBase = snap8(layout.FLOOR_BOT - 8 + jy);
-  const floorY = (h: number) => snap8(floorBase - h);
+  const doorCol = layout.doorX - 24;
 
-  // Horizontal lanes shift with preset (keeps x >= 24, glass left of door column)
-  const lane = (idx: number) => snap8(96 + idx * 168 + ((p * 11) % 40) + jx);
+  const wallMidBase = layout.WALL_TOP + 100 + (p % 3) * 12 + jy;
+  const floorBase = layout.FLOOR_BOT - 8 + jy;
 
-  const noteAR = pxRect(lane(0), floorY(52), 64, 52);
-  const switchR = pxRect(lane(0) + 8, wallMid - 64, 72, 120);
-  const hammerR = pxRect(lane(1), floorY(64), 104, 64);
-  const knifeR = pxRect(lane(1) - 32, floorY(44), 88, 44);
-  const crowbarR = pxRect(lane(0) + 40, floorY(48), 96, 48);
-  const glassR = pxRect(lane(2), wallMid - 80, 176, 168);
-  const briefR = pxRect(lane(2) - 40, floorY(76), 144, 72);
-  const crateR = pxRect(lane(2) - 16, floorY(80), 144, 80);
-  const sdR = pxRect(lane(3) - 48, floorY(52), 96, 52);
-  const ventR = pxRect(lane(3), wallMid - 68, 160, 136);
-  const noteBR = pxRect(lane(3) - 8, floorY(50), 64, 48);
-  const keyR = pxRect(Math.min(lane(3) + 120, layout.doorX - 120), floorY(52), 88, 52);
+  const mkLane = (base: number, step: number, idx: number) =>
+    snap8(base + idx * step + ((p * 13) % 32) + jx);
+
+  let wallMid: number;
+  let lane: (i: number) => number;
+  let floorY: (h: number) => number;
+
+  switch (mk) {
+    case 1: {
+      // Wide floor band, props spread further apart
+      wallMid = snap8(wallMidBase + 8);
+      floorY = (h) => snap8(floorBase - h);
+      lane = (i) => mkLane(48, 200, i);
+      break;
+    }
+    case 2: {
+      // Tight left cluster + wall focus right of center (before door)
+      wallMid = snap8(wallMidBase - 6);
+      floorY = (h) => snap8(floorBase - h - 4);
+      lane = (i) => mkLane(72, 148, i);
+      break;
+    }
+    case 3: {
+      // Elevated wall line (taller props feel "hung")
+      wallMid = snap8(wallMidBase + 20);
+      floorY = (h) => snap8(floorBase - h + 4);
+      lane = (i) => mkLane(88, 176, i);
+      break;
+    }
+    case 4: {
+      // Pushed toward left — more empty floor right of vent (cleaner door approach)
+      wallMid = snap8(wallMidBase);
+      floorY = (h) => snap8(floorBase - h);
+      lane = (i) => mkLane(40, 156, i);
+      break;
+    }
+    case 5: {
+      // Deep floor (props sit slightly higher on the band)
+      wallMid = snap8(wallMidBase + 4);
+      floorY = (h) => snap8(floorBase - h - 10);
+      lane = (i) => mkLane(104, 168, i);
+      break;
+    }
+    default: {
+      // Classic evenly-spaced lanes
+      wallMid = snap8(wallMidBase);
+      floorY = (h) => snap8(floorBase - h);
+      lane = (i) => mkLane(96, 168, i);
+    }
+  }
+
+  const clampDoor = (x: number, w: number) => Math.min(x, doorCol - w - 8);
+
+  const noteAR = pxRect(clampDoor(lane(0), 64), floorY(52), 64, 52);
+  const switchR = pxRect(clampDoor(lane(0) + 8, 72), wallMid - 64, 72, 120);
+  const hammerR = pxRect(clampDoor(lane(1), 104), floorY(64), 104, 64);
+  const knifeR = pxRect(clampDoor(lane(1) - 24, 88), floorY(44), 88, 44);
+  const crowbarR = pxRect(clampDoor(lane(0) + 32, 96), floorY(48), 96, 48);
+  const glassR = pxRect(clampDoor(lane(2), 176), wallMid - 80, 176, 168);
+  const briefR = pxRect(clampDoor(lane(2) - 48, 144), floorY(76), 144, 72);
+  const crateR = pxRect(clampDoor(lane(2) - 24, 144), floorY(80), 144, 80);
+  const sdR = pxRect(clampDoor(lane(3) - 56, 96), floorY(52), 96, 52);
+  const ventR = pxRect(clampDoor(lane(3), 160), wallMid - 68, 160, 136);
+  const noteBR = pxRect(clampDoor(lane(3) - 8, 64), floorY(50), 64, 48);
+  const keyR = pxRect(clampDoor(lane(3) + 56, 88), floorY(52), 88, 52);
   const lockR = pxRect(layout.doorX - 72 + jx, layout.doorY + 120 + jy, 64, 112);
+  void mk;
   return {
     noteAR,
     switchR,
@@ -772,13 +851,14 @@ function buildToolChainRoom(
   const layout = makeLayout();
 
   const chainKind = ((globalSeed >>> 0) + i * 92837111) % 12;
+  const mapKind = ((globalSeed >>> 0) + i * 17 + 5) % 6;
   const toolIdx = Math.floor(chainKind / 4) % 3; // 0 hammer, 1 crowbar, 2 knife
   const useBrief = Math.floor((chainKind % 4) / 2) === 1;
   const switchInverted = chainKind % 2 === 1;
 
   const jx = spread(i, chainKind, 1, 10);
   const jy = spread(i, chainKind, 2, 6);
-  const S = buildStageSlots(layout, chainKind, jx, jy);
+  const S = buildStageSlots(layout, mapKind, chainKind, jx, jy);
 
   const hammerId = `hammer_r${i}`;
   const crowbarId = `crowbar_r${i}`;
@@ -836,6 +916,7 @@ function buildToolChainRoom(
     collidable: false,
     interactable: true,
     removeBackground: true,
+    depthLayer: 2,
     kind: "clue_note",
     gives: fClueA,
     itemId: noteAId,
@@ -858,6 +939,8 @@ function buildToolChainRoom(
     collidable: false,
     interactable: true,
     removeBackground: true,
+    depthLayer: 1,
+    visibleWhenAll: [fClueA],
     kind: "switch",
     initialOn: switchInverted,
     targetOn: !switchInverted,
@@ -882,8 +965,10 @@ function buildToolChainRoom(
       collidable: false,
       interactable: true,
       removeBackground: true,
+      depthLayer: 2,
       kind: "tool_item",
-      hiddenUntilFlag: fPower,
+      visibleWhenAll: [fPower],
+      hiddenWhenAny: [fCrowUp],
       gives: fCrowUp,
       itemId: crowbarId,
       itemDisplayName: "Crowbar",
@@ -903,8 +988,10 @@ function buildToolChainRoom(
       collidable: false,
       interactable: true,
       removeBackground: true,
+      depthLayer: 2,
       kind: "tool_item",
-      hiddenUntilFlag: fPower,
+      visibleWhenAll: [fPower],
+      hiddenWhenAny: [fKnifeUp],
       gives: fKnifeUp,
       itemId: knifeId,
       itemDisplayName: "Utility knife",
@@ -924,8 +1011,10 @@ function buildToolChainRoom(
       collidable: false,
       interactable: true,
       removeBackground: true,
+      depthLayer: 2,
       kind: "tool_item",
-      hiddenUntilFlag: fPower,
+      visibleWhenAll: [fPower],
+      hiddenWhenAny: [fHammerUp],
       gives: fHammerUp,
       itemId: hammerId,
       itemDisplayName: "Hammer",
@@ -948,6 +1037,8 @@ function buildToolChainRoom(
       collidable: false,
       interactable: true,
       removeBackground: true,
+      depthLayer: 1,
+      visibleWhenAll: [fPower],
       kind: "breakable",
       needsToolKind: "crowbar",
       gives: fCrate,
@@ -965,6 +1056,8 @@ function buildToolChainRoom(
       collidable: false,
       interactable: true,
       removeBackground: true,
+      depthLayer: 1,
+      visibleWhenAll: [fPower],
       kind: "breakable",
       needsToolKind: firstNeedsKnife ? "knife" : "hammer",
       gives: fGlass,
@@ -988,8 +1081,10 @@ function buildToolChainRoom(
     collidable: false,
     interactable: true,
     removeBackground: true,
+    depthLayer: 2,
     kind: "tool_item",
-    hiddenUntilFlag: firstOpenFlag,
+    visibleWhenAll: [fPower, firstOpenFlag],
+    hiddenWhenAny: [fSd],
     gives: fSd,
     itemId: screwdriverId,
     itemDisplayName: "Screwdriver",
@@ -1011,6 +1106,8 @@ function buildToolChainRoom(
       collidable: false,
       interactable: true,
       removeBackground: true,
+      depthLayer: 1,
+      visibleWhenAll: [firstOpenFlag],
       kind: "breakable",
       needsToolKind: "screwdriver",
       gives: fVent,
@@ -1028,6 +1125,8 @@ function buildToolChainRoom(
       collidable: false,
       interactable: true,
       removeBackground: true,
+      depthLayer: 1,
+      visibleWhenAll: [firstOpenFlag],
       kind: "breakable",
       needsToolKind: "screwdriver",
       gives: fVent,
@@ -1061,8 +1160,9 @@ function buildToolChainRoom(
     collidable: false,
     interactable: true,
     removeBackground: true,
+    depthLayer: 2,
     kind: "clue_note",
-    hiddenUntilFlag: fVent,
+    visibleWhenAll: [fVent],
     gives: fCode,
     itemId: noteBId,
     itemDisplayName: "Coded slip",
@@ -1084,8 +1184,9 @@ function buildToolChainRoom(
     collidable: false,
     interactable: true,
     removeBackground: true,
+    depthLayer: 2,
     kind: "tool_item",
-    hiddenUntilFlag: fVent,
+    visibleWhenAll: [fVent],
     gives: fKey,
     itemId: keyId,
     itemDisplayName: isLast ? "Exit key" : "Transit key",
@@ -1106,6 +1207,8 @@ function buildToolChainRoom(
     collidable: false,
     interactable: true,
     removeBackground: true,
+    depthLayer: 1,
+    visibleWhenAll: [fCode],
     kind: isLast ? "letter_lock" : "keypad",
     codeAnswer: isLast ? letterCode : code,
     codeLength: 4,
@@ -1130,7 +1233,8 @@ function buildToolChainRoom(
     ),
   );
 
-  objects.push(makeWallDeco(base, i, layout));
+  const deco = makeWallDeco(base, i, layout);
+  objects.push({ ...deco, depthLayer: 0 });
 
   const baseIntro = isFirst
     ? `You wake up in the ${base.rooms[i]}. The door behind you is sealed.`
@@ -1141,7 +1245,7 @@ function buildToolChainRoom(
   const toolName = firstBoxIsCrate ? "crowbar→crate" : firstNeedsKnife ? "knife→glass" : "hammer→glass";
   const secondName = useBrief ? "screwdriver→case" : "screwdriver→vent";
   const chainIntro = [
-    `Workflow #${chainKind + 1}/12 (seed ${globalSeed >>> 0}): note → ${switchInverted ? "breaker OFF" : "breaker ON"} → ${toolName} → ${secondName} → read code → key → door lock.`,
+    `Map ${mapKind + 1}/6 · Workflow #${chainKind + 1}/12 (seed ${globalSeed >>> 0}): note → ${switchInverted ? "breaker OFF" : "breaker ON"} → ${toolName} → ${secondName} → read code → key → door lock.`,
     "Equip a tool, click the matching prop, then use the key on the lock before entering the code or word.",
   ].join("\n");
 

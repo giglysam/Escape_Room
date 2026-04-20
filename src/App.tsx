@@ -170,6 +170,12 @@ export default function App() {
         return;
       }
 
+      const vis = obj.visibleWhenAll ?? (obj.hiddenUntilFlag ? [obj.hiddenUntilFlag] : undefined);
+      if (vis && vis.length > 0 && !vis.every((f) => engine.hasFlag(f))) {
+        showToast("Nothing to use here yet.");
+        return;
+      }
+
       switch (obj.kind) {
         case "clue_note": {
           engine.readNote(obj);
@@ -201,7 +207,7 @@ export default function App() {
           const next = engine.toggleSwitch(obj);
           setInventoryRev((n) => n + 1);
           showToast(`Switch → ${next ? "ON" : "OFF"}.`);
-          if (next && obj.gives && engine.hasFlag(obj.gives)) {
+          if (next === !!obj.targetOn && obj.gives) {
             setTimeout(
               () => showToast("Power restored. Something in the room just woke up."),
               300,

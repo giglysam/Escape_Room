@@ -191,6 +191,25 @@ export class GameEngine {
     this.state.flags.add(id);
   }
 
+  /** Set `gives` plus optional `givesFlags` from a room object (REM-style chain). */
+  private applyGives(obj: RoomObject) {
+    if (obj.gives) this.setFlag(obj.gives);
+    if (obj.givesFlags) {
+      for (const f of obj.givesFlags) this.setFlag(f);
+    }
+  }
+
+  /** Whether this object should exist in the scene right now (show/hide DAG). */
+  private isObjectVisible(obj: RoomObject): boolean {
+    const need =
+      obj.visibleWhenAll ?? (obj.hiddenUntilFlag ? [obj.hiddenUntilFlag] : undefined);
+    if (need && need.length > 0) {
+      if (!need.every((f) => this.hasFlag(f))) return false;
+    }
+    if (obj.hiddenWhenAny?.some((f) => this.hasFlag(f))) return false;
+    return true;
+  }
+
   hasItem(itemId: string): boolean {
     return this.state.inventory.has(itemId);
   }
@@ -228,7 +247,7 @@ export class GameEngine {
   pickUpTool(obj: RoomObject): "picked" | "already" {
     if (obj.itemId && this.state.inventory.has(obj.itemId)) return "already";
     this.collectInventoryFromObject(obj);
-    if (obj.gives) this.setFlag(obj.gives);
+    this.applyGives(obj);
     this.state.consumedObjectIds.add(obj.id);
     this.reloadPlaced();
     return "picked";
@@ -241,7 +260,8 @@ export class GameEngine {
    */
   readNote(obj: RoomObject) {
     this.collectInventoryFromObject(obj);
-    if (obj.gives) this.setFlag(obj.gives);
+    this.applyGives(obj);
+    this.reloadPlaced();
   }
 
   /**
@@ -253,7 +273,7 @@ export class GameEngine {
     const tool = this.getEquipped();
     if (!tool) return "no_tool";
     if (!obj.needsToolKind || tool.toolKind !== obj.needsToolKind) return "wrong_tool";
-    if (obj.gives) this.setFlag(obj.gives);
+    this.applyGives(obj);
     this.state.consumedObjectIds.add(obj.id);
     playBigSuccess();
     this.reloadPlaced();
@@ -267,7 +287,7 @@ export class GameEngine {
     playClick();
     // A switch's `gives` fires whenever it reaches its `targetOn` state.
     if (obj.gives && next === !!obj.targetOn) {
-      this.setFlag(obj.gives);
+      this.applyGives(obj);
       this.reloadPlaced();
     }
     return next;
@@ -290,7 +310,7 @@ export class GameEngine {
       return "wrong";
     }
     if (obj.needsKeyItemId) this.consumeItem(obj.needsKeyItemId);
-    if (obj.gives) this.setFlag(obj.gives);
+    this.applyGives(obj);
     if (obj.gives && obj.gives.startsWith("door_") && obj.gives.endsWith("_unlocked")) {
       playUnlock();
     } else {
@@ -355,7 +375,7 @@ export class GameEngine {
     this.placed = [];
     for (const obj of this.currentRoom.objects) {
       if (this.state.consumedObjectIds.has(obj.id)) continue;
-      if (obj.hiddenUntilFlag && !this.hasFlag(obj.hiddenUntilFlag)) continue;
+      if (!this.isObjectVisible(obj)) continue;
       const asset = this.assets.objects.get(`${this.currentRoom.id}:${obj.id}`);
       if (!asset) continue;
 
@@ -371,6 +391,12 @@ export class GameEngine {
       const hitRect = { x: obj.x, y: obj.y, w: obj.width, h: obj.height };
       this.placed.push({ obj, drawRect, hitRect, asset });
     }
+    this.placed.sort((a, b) => {
+      const la = a.obj.depthLayer ?? 1;
+      const lb = b.obj.depthLayer ?? 1;
+      if (la !== lb) return la - lb;
+      return a.drawRect.y + a.drawRect.h - (b.drawRect.y + b.drawRect.h);
+    });
   }
 
   // ---------- input ----------
@@ -523,21 +549,14 @@ export class GameEngine {
     ctx.fillStyle = `${this.currentRoom.ambient_color}33`;
     ctx.fillRect(0, 0, W, H);
 
-    // Z-order: smaller (y+h) first. Character is drawn between
-    // floor_back and floor_front bands by splitting the list.
-    const sorted = [...this.placed].sort(
-      (a, b) => a.drawRect.y + a.drawRect.h - (b.drawRect.y + b.drawRect.h),
-    );
-
-    const charBaseline = this.charY + CHARACTER_H;
-    const back: PlacedObject[] = [];
-    const front: PlacedObject[] = [];
-    for (const p of sorted) {
-      if (p.drawRect.y + p.drawRect.h <= charBaseline) back.push(p);
-      else front.push(p);
-    }
+    // Layer 0 = back wall, 1 = mid (door, wall props), 2 = floor props. Character between 1 and 2.
+    const layer = (p: PlacedObject) => p.obj.depthLayer ?? 1;
+    const back = this.placed.filter((p) => layer(p) === 0);
+    const mid = this.placed.filter((p) => layer(p) === 1);
+    const front = this.placed.filter((p) => layer(p) === 2);
 
     this.drawPropList(back);
+    this.drawPropList(mid);
     this.drawCharacter();
     this.drawPropList(front);
 
