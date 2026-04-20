@@ -220,7 +220,9 @@ export default function App() {
                   ? "comes loose"
                   : obj.needsToolKind === "knife"
                     ? "parts cleanly"
-                    : "opens";
+                    : obj.needsToolKind === "crowbar"
+                      ? "splinters open"
+                      : "opens";
             setModal({
               kind: "info",
               title: "Opened!",

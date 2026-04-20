@@ -766,15 +766,13 @@ function labelFor(obj: RoomObject, equippedTool: ToolKind | null): string {
       return `Pick up ${obj.itemDisplayName ?? "item"}`;
     case "breakable": {
       if (obj.needsToolKind && equippedTool === obj.needsToolKind) {
-        return obj.needsToolKind === "hammer"
-          ? "Smash glass"
-          : obj.needsToolKind === "screwdriver"
-            ? "Unscrew grate"
-            : obj.needsToolKind === "knife"
-              ? "Cut seal"
-              : obj.needsToolKind === "crowbar"
-                ? "Pry open"
-                : "Use tool";
+        if (obj.needsToolKind === "hammer") return "Smash glass";
+        if (obj.needsToolKind === "screwdriver") {
+          return obj.name === "briefcase" ? "Unscrew case" : "Unscrew grate";
+        }
+        if (obj.needsToolKind === "knife") return "Cut seal";
+        if (obj.needsToolKind === "crowbar") return "Pry open";
+        return "Use tool";
       }
       return "Inspect";
     }
