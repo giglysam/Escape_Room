@@ -163,10 +163,19 @@ export default function App() {
         case "item": {
           if (!obj.gives) return;
           if (!engine.hasItem(obj.gives) && !engine.hasFlag(obj.gives)) {
-            engine.collectItem(obj.gives);
             engine.setFlag(obj.gives);
+            // Chained rooms use `gives` for progression flags — those must not
+            // appear in the Items sidebar (only real collectibles do).
+            const g = obj.gives;
+            const isProgressionOnly =
+              g.includes("_flag_") || /^door_room\d+_unlocked$/.test(g);
+            if (!isProgressionOnly) {
+              engine.collectItem(g);
+              showToast(`Picked up: ${prettyItemName(g)}.`);
+            } else {
+              showToast(obj.description ?? "Something in the room shifts.");
+            }
             setInventoryRev((n) => n + 1);
-            showToast(`Picked up: ${prettyItemName(obj.gives)}.`);
           }
           return;
         }

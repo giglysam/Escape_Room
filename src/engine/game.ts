@@ -335,7 +335,10 @@ export class GameEngine {
         w: fit.dw,
         h: fit.dh,
       };
-      const hitRect = { x: drawRect.x, y: drawRect.y, w: drawRect.w, h: drawRect.h };
+      // Hitbox follows the plan rect (w/h), not the aspect-fitted sprite —
+      // matches Room Escape Maker–style "interaction zones" so clicks line up
+      // with the authored 1280×720 placement even when the cutout is letterboxed.
+      const hitRect = { x: obj.x, y: obj.y, w: obj.width, h: obj.height };
 
       this.placed.push({ obj, drawRect, hitRect, asset });
     }

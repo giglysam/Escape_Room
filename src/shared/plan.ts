@@ -404,6 +404,20 @@ function buildCustomTheme(theme: string): ThemeDef {
 
 export const PLAN_CANVAS = { width: W, height: H, floorTop: FLOOR_TOP };
 
+/**
+ * REM / Room Escape Maker style: every object is authored in integer
+ * 1280×720 plan pixels (top-left origin). `width`/`height` are the
+ * interaction box; sprites are aspect-fitted inside that box in the engine.
+ */
+function pxRect(x: number, y: number, width: number, height: number) {
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
 const OBJ_STYLE =
   "single small object only, centered subject, " +
   "background is a pure flat solid white #ffffff color filling the entire image, " +
@@ -481,17 +495,27 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
  */
 
 function composeBackgroundPrompt(
-  _room: RoomPlan,
+  room: RoomPlan,
   base: ThemeDef,
   i: number,
   _numRooms: number,
 ): string {
-  void _room;
   void _numRooms;
 
   // Use the theme's prose background as the world flavour, but strip any
   // wording that might cause the model to paint props.
   const sceneBase = base.bgs[i] ?? base.bgs[0]!;
+
+  // Encode the exact compositional grid so the painter keeps plain
+  // wall/floor texture where cutouts will sit (no ghost doors/buttons).
+  const placementHints = room.objects
+    .map((o) => {
+      const cx = Math.round(o.x + o.width / 2);
+      const cy = Math.round(o.y + o.height / 2);
+      const band = cy < FLOOR_TOP ? "back wall band" : "floor band";
+      return `${o.kind} "${o.name}": ${band}, empty rectangle top-left (${o.x}, ${o.y}) size ${o.width}×${o.height}px, center (${cx}, ${cy})`;
+    })
+    .join("; ");
 
   // Strong, repeated negatives to enforce an empty room. The model
   // weights repeated tokens, so we list the same forbidden category in
@@ -544,9 +568,15 @@ function composeBackgroundPrompt(
     "completely empty atmospheric room interior, only the back wall and the floor are visible",
     "no objects of any kind, no furniture, no doors, no windows, no props",
     "rich theme-driven wall textures and floor textures, deep ambient lighting, painterly atmosphere, immersive mood",
-    `straight-on 2D side-scrolling camera, ${W}x${H} pixels, back wall fills the upper half, floor fills the lower half`,
+    `straight-on 2D side-scrolling camera, fixed ${W}x${H} pixel frame, origin top-left (0,0), bottom-right (${W},${H})`,
+    `vertical split: y=0..${FLOOR_TOP - 1} is back wall; y=${FLOOR_TOP}..${H - 1} is floor — keep those regions continuous texture only`,
+    placementHints
+      ? `Leave these volumes as uninterrupted wall/floor paint only (separate PNG cutouts will be placed exactly on top): ${placementHints}`
+      : "",
     forbidden,
-  ].join(", ");
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 // ===============================================================
@@ -570,8 +600,8 @@ function makeLayout(): RoomLayout {
   // REM-style door: tall, base sits on the floor (door bottom = FLOOR_BOT)
   const doorW = 200;
   const doorH = 440;
-  const doorX = W - doorW - 60;
-  const doorY = FLOOR_BOT - doorH; // bottom of door touches the floor band
+  const doorX = Math.round(W - doorW - 60);
+  const doorY = Math.round(FLOOR_BOT - doorH); // bottom of door touches the floor band
   return { WALL_TOP, WALL_BOT, FLOOR_BOT, doorX, doorY, doorW, doorH };
 }
 
@@ -587,14 +617,15 @@ function makeDoor(
   const doorPrompt = isLast
     ? `${doorBase}, large heavy ornate exit door with glowing edges, ${OBJ_STYLE}`
     : `${doorBase}, closed, ${OBJ_STYLE}`;
+  const dr = pxRect(layout.doorX, layout.doorY, layout.doorW, layout.doorH);
   return {
     id: `room${i}_door`,
     name: "door",
     prompt: doorPrompt,
-    x: layout.doorX,
-    y: layout.doorY,
-    width: layout.doorW,
-    height: layout.doorH,
+    x: dr.x,
+    y: dr.y,
+    width: dr.width,
+    height: dr.height,
     collidable: true,
     interactable: true,
     removeBackground: true,
@@ -606,22 +637,22 @@ function makeDoor(
 
 function makeWallDeco(
   base: ThemeDef,
-  rng: () => number,
   i: number,
   layout: RoomLayout,
-  excludeIdx?: number,
 ): RoomObject {
-  let idx = randInt(rng, 0, base.decoStyles.length - 1);
-  if (excludeIdx !== undefined && idx === excludeIdx)
-    idx = (idx + 1) % base.decoStyles.length;
+  const n = base.decoStyles.length;
+  const idx = n > 0 ? i % n : 0;
+  const style = n > 0 ? base.decoStyles[idx]! : "small ambient prop";
+  // Fixed left-wall slot — deterministic per room index, no RNG drift.
+  const r = pxRect(20, layout.WALL_TOP + 36, 92, 132);
   return {
     id: `room${i}_deco_wall`,
     name: "deco_wall",
-    prompt: `${base.decoStyles[idx]}, ${OBJ_STYLE}`,
-    x: randInt(rng, 8, 22),
-    y: layout.WALL_BOT - 130,
-    width: 88,
-    height: 130,
+    prompt: `${style}, ${OBJ_STYLE}`,
+    x: r.x,
+    y: r.y,
+    width: r.width,
+    height: r.height,
     collidable: false,
     interactable: false,
     removeBackground: true,
@@ -684,19 +715,6 @@ function buildRoom(
 // All `requires` / `gives` strings are scoped per room (`roomN_step_X`)
 // so flags from previous rooms never bleed into later ones.
 
-function gridY(layout: RoomLayout, anchor: "wall_top" | "wall_mid" | "floor_back" | "floor_front", h: number): number {
-  switch (anchor) {
-    case "wall_top": // back-wall, near top
-      return layout.WALL_TOP + 20;
-    case "wall_mid": // back-wall, middle (around eye-level)
-      return layout.WALL_TOP + 80;
-    case "floor_back": // standing on the floor, back row (closer to wall)
-      return layout.FLOOR_BOT - h - 20;
-    case "floor_front": // standing on the floor, front row (closer to camera)
-      return layout.FLOOR_BOT - h - 4;
-  }
-}
-
 function buildChainedRoom(
   rng: () => number,
   base: ThemeDef,
@@ -712,16 +730,27 @@ function buildChainedRoom(
   const flag = (k: number) => `${roomId}_flag_${k}`;
   const doorFlag = `door_${roomId}_unlocked`;
 
+  // ---- Fixed 1280×720 layout (REM-style integer plan coords) ----
+  const floorItemH = 58;
+  const floorItemY = Math.round(layout.FLOOR_BOT - floorItemH - 6);
+  const floorBackChestY = Math.round(layout.FLOOR_BOT - 132 - 22);
+  const floorBackPedY = Math.round(layout.FLOOR_BOT - 168 - 22);
+  const switchR = pxRect(108, layout.WALL_TOP + 78, 72, 108);
+  const item2R = pxRect(248, floorItemY, 64, floorItemH);
+  const chestR = pxRect(414, floorBackChestY, 132, 132);
+  const item4R = pxRect(548, floorItemY, 64, floorItemH);
+  const pedR = pxRect(668, floorBackPedY, 168, 168);
+  const keyR = pxRect(492, floorItemY, 64, floorItemH);
+
   // ---- STEP 1: WALL SWITCH on the back wall ----
-  const sw1Y = gridY(layout, "wall_mid", 100);
   objects.push({
     id: `${roomId}_step1_switch`,
     name: "main_switch",
     prompt: `${base.switchPrompt}, ${OBJ_STYLE}`,
-    x: 110,
-    y: sw1Y,
-    width: 70,
-    height: 110,
+    x: switchR.x,
+    y: switchR.y,
+    width: switchR.width,
+    height: switchR.height,
     collidable: false,
     interactable: true,
     removeBackground: true,
@@ -738,10 +767,10 @@ function buildChainedRoom(
     id: `${roomId}_step2_item`,
     name: "key_a",
     prompt: `${base.itemPrompts[0] ?? "small thematic item"}, ${OBJ_STYLE}`,
-    x: randInt(rng, 230, 320),
-    y: gridY(layout, "floor_front", 56),
-    width: 60,
-    height: 56,
+    x: item2R.x,
+    y: item2R.y,
+    width: item2R.width,
+    height: item2R.height,
     collidable: false,
     interactable: true,
     removeBackground: true,
@@ -756,10 +785,10 @@ function buildChainedRoom(
     id: `${roomId}_step3_container`,
     name: "container",
     prompt: `small thematic chest or storage box that fits inside the world, ${base.pedestalPrompt}, ${OBJ_STYLE}`,
-    x: randInt(rng, 380, 460),
-    y: gridY(layout, "floor_back", 130),
-    width: 130,
-    height: 130,
+    x: chestR.x,
+    y: chestR.y,
+    width: chestR.width,
+    height: chestR.height,
     collidable: true,
     interactable: true,
     removeBackground: true,
@@ -776,10 +805,10 @@ function buildChainedRoom(
       id: `${roomId}_step4_item`,
       name: "key_b",
       prompt: `${base.itemPrompts[1] ?? "small thematic item"}, ${OBJ_STYLE}`,
-      x: randInt(rng, 540, 620),
-      y: gridY(layout, "floor_front", 56),
-      width: 60,
-      height: 56,
+      x: item4R.x,
+      y: item4R.y,
+      width: item4R.width,
+      height: item4R.height,
       collidable: false,
       interactable: true,
       removeBackground: true,
@@ -796,10 +825,10 @@ function buildChainedRoom(
       id: `${roomId}_step5_pedestal`,
       name: "pedestal",
       prompt: `${base.pedestalPrompt}, ${OBJ_STYLE}`,
-      x: randInt(rng, 660, 730),
-      y: gridY(layout, "floor_back", 160),
-      width: 160,
-      height: 160,
+      x: pedR.x,
+      y: pedR.y,
+      width: pedR.width,
+      height: pedR.height,
       collidable: true,
       interactable: true,
       removeBackground: true,
@@ -817,10 +846,10 @@ function buildChainedRoom(
       id: `${roomId}_step6_key`,
       name: "door_key",
       prompt: `${base.itemPrompts[2] ?? "small thematic key"}, ${OBJ_STYLE}`,
-      x: randInt(rng, 480, 560),
-      y: gridY(layout, "floor_front", 56),
-      width: 60,
-      height: 56,
+      x: keyR.x,
+      y: keyR.y,
+      width: keyR.width,
+      height: keyR.height,
       collidable: false,
       interactable: true,
       removeBackground: true,
@@ -843,14 +872,15 @@ function buildChainedRoom(
     if (stepKey) stepKey.gives = flag(6);
 
     const seq = ["✦", "✧", "✪", "✺"];
+    const muralR = pxRect(196, layout.WALL_TOP + 18, 224, 132);
     objects.push({
       id: `${roomId}_step7_mural`,
       name: "mural",
       prompt: `${base.muralPrompt}, ${OBJ_STYLE}`,
-      x: 200,
-      y: layout.WALL_TOP + 20,
-      width: 220,
-      height: 130,
+      x: muralR.x,
+      y: muralR.y,
+      width: muralR.width,
+      height: muralR.height,
       collidable: false,
       interactable: true,
       removeBackground: true,
@@ -864,19 +894,21 @@ function buildChainedRoom(
       const j = randInt(rng, 0, s);
       [order[s], order[j]] = [order[j]!, order[s]!];
     }
-    const buttonY = layout.FLOOR_BOT - 90;
-    const startX = 90;
-    const stepX = 130;
+    const buttonY = Math.round(layout.FLOOR_BOT - 88);
+    const startX = 92;
+    const stepX = 128;
+    const btnSize = 80;
     for (let k = 0; k < seq.length; k++) {
       const symbolIdx = order[k]!;
+      const br = pxRect(startX + k * stepX, buttonY, btnSize, btnSize);
       objects.push({
         id: `${roomId}_step7_btn${k}`,
         name: `btn${k}`,
         prompt: `${base.buttonPrompt}, ${OBJ_STYLE}`,
-        x: startX + k * stepX,
-        y: buttonY,
-        width: 78,
-        height: 78,
+        x: br.x,
+        y: br.y,
+        width: br.width,
+        height: br.height,
         collidable: false,
         interactable: true,
         removeBackground: true,
@@ -905,7 +937,7 @@ function buildChainedRoom(
   );
 
   // ---- WALL DECO (always non-interactable, just atmosphere) ----
-  objects.push(makeWallDeco(base, rng, i, layout));
+  objects.push(makeWallDeco(base, i, layout));
 
   return [
     objects,
