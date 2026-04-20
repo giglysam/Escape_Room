@@ -54,6 +54,7 @@ function fingerprintHeaders(seed: string, generatorType: string): Record<string,
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
   const fp = UA_POOL[Math.abs(h) % UA_POOL.length]!;
+  const rid = `${seed}-${Math.random().toString(36).slice(2, 9)}`;
   const headers: Record<string, string> = {
     "User-Agent": fp.ua,
     Accept: "*/*",
@@ -64,7 +65,10 @@ function fingerprintHeaders(seed: string, generatorType: string): Record<string,
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
-    Cookie: `_session=${seed}`, // bogus cookie just to vary the fingerprint
+    "X-Request-Id": rid,
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    Cookie: `_session=${encodeURIComponent(seed)}; sid=${encodeURIComponent(rid)}`,
   };
   if (fp.chUa) {
     headers["sec-ch-ua"] = fp.chUa;
@@ -113,14 +117,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // ignore warm-up errors
     }
 
-    const apiResp = await fetchWithRetry(`${BASE}/api/generate`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({
-        positivePrompt: prompt,
-        generatorType,
-      }),
-    });
+    const apiResp = await fetchWithRetry(
+      `${BASE}/api/generate`,
+      {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({
+          positivePrompt: prompt,
+          generatorType,
+        }),
+      },
+      6,
+      900,
+    );
 
     if (!apiResp.ok) {
       const text = await apiResp.text();

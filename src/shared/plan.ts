@@ -226,8 +226,19 @@ interface ThemeDef {
   keyPrompt: string;
 }
 
+/** One coherent look for the empty shell — must match cutout OBJECT_SCENE_SUFFIX. */
 const BG_STYLE =
-  "interior wide shot, side-scrolling 2D perspective view, single empty room with back wall and floor visible, no characters, no people, no creatures, no text, cinematic lighting, ultra detailed concept art, painterly, 16:9";
+  "2D escape room game background, fixed orthographic camera straight-on, no perspective distortion, " +
+  "flat side-scroller layout: one continuous back wall plane and one flat floor plane meeting at a clean horizon, " +
+  "even soft ambient lighting from front-left, low contrast, no harsh shadows, no depth blur, " +
+  "hand-painted stylized game art (NOT photorealistic), same saturation as casual mobile puzzle games, " +
+  "1280x720 composition, empty room with no props, no characters, no text, 16:9";
+
+/** Appended to every object cutout prompt so assets match the backdrop art style. */
+const OBJECT_SCENE_SUFFIX =
+  "2D game prop asset, same stylized hand-painted look as a flat escape-room background, " +
+  "orthographic side-view, no perspective warp, soft ambient light from front-left, no cast shadow, " +
+  "neutral saturation, readable silhouette, designed to sit on a flat floor or flat wall in a 1280x720 scene";
 
 const THEMES: ThemeDef[] = [
   {
@@ -483,13 +494,12 @@ function clampBgPrompt(s: string): string {
 }
 
 const OBJ_STYLE =
-  "single small object only, centered subject, " +
-  "background is a pure flat solid white #ffffff color filling the entire image, " +
-  "no gradient, no texture, no pattern, no scene, no surface, no shadow, no reflection, " +
-  "isolated cutout product photo style, " +
-  "no environment, no room, no building, no house, no cabin, no architecture, " +
+  "single prop only, centered, " +
+  "background pure flat white #ffffff filling entire frame, " +
+  "no gradient, no scene, no floor, no wall, no shadow, no reflection, " +
   "no people, no creatures, no text, no logos, " +
-  "ultra detailed, sharp focus, even lighting";
+  `${OBJECT_SCENE_SUFFIX}, ` +
+  "clean edges, sharp focus";
 
 // ===============================================================
 // Public API
@@ -541,9 +551,9 @@ function composeBackgroundPrompt(room: RoomPlan, base: ThemeDef, i: number): str
     sceneBaseRaw.length > 420 ? `${sceneBaseRaw.slice(0, 417).trimEnd()}…` : sceneBaseRaw;
 
   const core =
-    `Empty ${W}x${H}px escape-room backdrop only: wall y=0–${FLOOR_TOP - 1}, floor y=${FLOOR_TOP}–${H - 1}, ` +
-    `orthographic straight-on, continuous texture, no props. ` +
-    `Leave each VOID as blank wall/floor paint (PNG props snap to these pixels): `;
+    `Empty ${W}x${H}px 2D game backdrop: wall y=0–${FLOOR_TOP - 1}, floor y=${FLOOR_TOP}–${H - 1}, ` +
+    `orthographic straight-on, no props, flat planes only. ` +
+    `VOIDS (blank paint for PNG overlays): `;
 
   const forbid = " Forbidden: doors, locks, vents, cases, notes, tools, people, text, UI.";
 
@@ -679,12 +689,11 @@ function makeWallDeco(base: ThemeDef, i: number, layout: RoomLayout): RoomObject
   };
 }
 
-type ChainKind = 0 | 1 | 2;
-
 interface StageSlots {
   noteAR: ReturnType<typeof pxRect>;
   switchR: ReturnType<typeof pxRect>;
   hammerR: ReturnType<typeof pxRect>;
+  knifeR: ReturnType<typeof pxRect>;
   crowbarR: ReturnType<typeof pxRect>;
   glassR: ReturnType<typeof pxRect>;
   briefR: ReturnType<typeof pxRect>;
@@ -696,30 +705,42 @@ interface StageSlots {
   lockR: ReturnType<typeof pxRect>;
 }
 
-/**
- * Stage geometry: props sit in believable bands (wall mid vs floor front),
- * left-to-right read order, clear of the door column on the right.
- */
-function buildStageSlots(layout: RoomLayout, jx: number, jy: number): StageSlots {
-  const wallMid = Math.round(layout.WALL_TOP + 110 + jy);
-  const floorY = (h: number) => Math.round(layout.FLOOR_BOT - h - 6 + jy);
+/** Snap to 8px grid for clean composition. */
+function snap8(n: number) {
+  return Math.round(n / 8) * 8;
+}
 
-  const noteAR = pxRect(172 + jx, floorY(52), 62, 52);
-  const switchR = pxRect(98 + jx, wallMid - 61, 74, 122);
-  const hammerR = pxRect(312 + jx, floorY(62), 104, 62);
-  const crowbarR = pxRect(132 + jx, floorY(46), 96, 46);
-  const glassR = pxRect(448 + jx, wallMid - 82, 176, 164);
-  const briefR = pxRect(372 + jx, floorY(74), 140, 74);
-  const crateR = pxRect(408 + jx, floorY(80), 140, 80);
-  const sdR = pxRect(492 + jx, floorY(50), 92, 50);
-  const ventR = pxRect(642 + jx, wallMid - 66, 156, 132);
-  const noteBR = pxRect(642 + jx, floorY(50), 64, 50);
-  const keyR = pxRect(756 + jx, floorY(52), 84, 52);
-  const lockR = pxRect(layout.doorX - 68 + jx, layout.doorY + 118, 64, 112);
+/**
+ * Anchor-based stage: wall band vs floor band, 8px grid, door column kept clear.
+ * `preset` (0..11) shifts the whole "set" so rooms feel like different layouts.
+ */
+function buildStageSlots(layout: RoomLayout, preset: number, jx: number, jy: number): StageSlots {
+  const p = ((preset % 12) + 12) % 12;
+  const wallMid = snap8(layout.WALL_TOP + 104 + (p % 3) * 16 + jy);
+  const floorBase = snap8(layout.FLOOR_BOT - 8 + jy);
+  const floorY = (h: number) => snap8(floorBase - h);
+
+  // Horizontal lanes shift with preset (keeps x >= 24, glass left of door column)
+  const lane = (idx: number) => snap8(96 + idx * 168 + ((p * 11) % 40) + jx);
+
+  const noteAR = pxRect(lane(0), floorY(52), 64, 52);
+  const switchR = pxRect(lane(0) + 8, wallMid - 64, 72, 120);
+  const hammerR = pxRect(lane(1), floorY(64), 104, 64);
+  const knifeR = pxRect(lane(1) - 32, floorY(44), 88, 44);
+  const crowbarR = pxRect(lane(0) + 40, floorY(48), 96, 48);
+  const glassR = pxRect(lane(2), wallMid - 80, 176, 168);
+  const briefR = pxRect(lane(2) - 40, floorY(76), 144, 72);
+  const crateR = pxRect(lane(2) - 16, floorY(80), 144, 80);
+  const sdR = pxRect(lane(3) - 48, floorY(52), 96, 52);
+  const ventR = pxRect(lane(3), wallMid - 68, 160, 136);
+  const noteBR = pxRect(lane(3) - 8, floorY(50), 64, 48);
+  const keyR = pxRect(Math.min(lane(3) + 120, layout.doorX - 120), floorY(52), 88, 52);
+  const lockR = pxRect(layout.doorX - 72 + jx, layout.doorY + 120 + jy, 64, 112);
   return {
     noteAR,
     switchR,
     hammerR,
+    knifeR,
     crowbarR,
     glassR,
     briefR,
@@ -733,8 +754,10 @@ function buildStageSlots(layout: RoomLayout, jx: number, jy: number): StageSlots
 }
 
 /**
- * One room = 8-step tool chain. `chainKind` (from global seed) picks a
- * different *mechanical story* so runs do not feel copy-pasted.
+ * One room = 8-step tool chain. `chainKind` 0..11 mixes first tool (hammer /
+ * crowbar / knife), second container (wall vent vs floor case), and inverted
+ * breaker logic — maps to many of the simple workflow patterns from the
+ * design list (reveal, tool+container, read note → code, etc.).
  */
 function buildToolChainRoom(
   rng: () => number,
@@ -748,13 +771,18 @@ function buildToolChainRoom(
   const roomId = `room${i}`;
   const layout = makeLayout();
 
-  const chainKind = ((globalSeed >>> 0) + i * 92837111) % 3 as ChainKind;
+  const chainKind = ((globalSeed >>> 0) + i * 92837111) % 12;
+  const toolIdx = Math.floor(chainKind / 4) % 3; // 0 hammer, 1 crowbar, 2 knife
+  const useBrief = Math.floor((chainKind % 4) / 2) === 1;
+  const switchInverted = chainKind % 2 === 1;
+
   const jx = spread(i, chainKind, 1, 10);
   const jy = spread(i, chainKind, 2, 6);
-  const S = buildStageSlots(layout, jx, jy);
+  const S = buildStageSlots(layout, chainKind, jx, jy);
 
   const hammerId = `hammer_r${i}`;
   const crowbarId = `crowbar_r${i}`;
+  const knifeId = `knife_r${i}`;
   const screwdriverId = `screwdriver_r${i}`;
   const keyId = `key_r${i}`;
   const noteAId = `noteA_r${i}`;
@@ -764,6 +792,7 @@ function buildToolChainRoom(
   const fPower = `r${i}_power`;
   const fHammerUp = `r${i}_hammer_up`;
   const fCrowUp = `r${i}_crow_up`;
+  const fKnifeUp = `r${i}_knife_up`;
   const fGlass = `r${i}_glass_broken`;
   const fCrate = `r${i}_crate_open`;
   const fSd = `r${i}_sd_up`;
@@ -778,16 +807,22 @@ function buildToolChainRoom(
 
   const objects: RoomObject[] = [];
 
-  const noteBodiesA: Record<ChainKind, string> = {
-    0: "The wall switch is dead until you acknowledge this scrap. Read it, then throw the breaker — the room wakes in layers.",
-    1: "Someone rewired the master breaker to ignore strangers. Acknowledge this note first — then the switch will accept you.",
-    2: "Power is out. The breaker won't listen until you've read this. After that, pry open whatever is nailed shut.",
-  };
-  const switchDesc: Record<ChainKind, string> = {
-    0: "Master breaker. Snap it on and the floor lights pick out what was hiding in the dark.",
-    1: "Primary disconnect — only responds after you've read the warning note on the floor.",
-    2: "Main power lever. Once it's live, look for cargo that was never meant to stay closed.",
-  };
+  const noteBodiesA = [
+    "Read this first — the breaker will not arm until someone acknowledges the floor tag.",
+    switchInverted
+      ? "Maintenance mode: the master switch must return to OFF before aux circuits wake. Read me, then flip it OFF."
+      : "Aux circuits are dark. Read this scrap, then throw the main breaker to wake the floor.",
+    toolIdx === 1
+      ? "Cargo shift: something nailed shut is hiding the next step. Power first, then pry."
+      : toolIdx === 2
+        ? "Security tape seals the display. Power the room, then cut the seal — quietly."
+        : "Standard lockout: note → power → break the seal on the wall unit → driver work → stash.",
+  ];
+  const notePick = noteBodiesA[toolIdx] ?? noteBodiesA[0]!;
+
+  const switchDesc = switchInverted
+    ? "Primary disconnect — flip to OFF to satisfy the lockout and wake hidden circuits."
+    : "Main breaker — flip ON to light the room and reveal what was sitting in the dark.";
 
   // -------- STEP 1: Note A --------
   objects.push({
@@ -806,8 +841,8 @@ function buildToolChainRoom(
     itemId: noteAId,
     itemDisplayName: "Floor note",
     itemEmoji: "📝",
-    noteTitle: chainKind === 1 ? "Warning tag" : chainKind === 2 ? "Shipping memo" : "Scrap note",
-    noteBody: noteBodiesA[chainKind],
+    noteTitle: switchInverted ? "Lockout tag" : toolIdx === 1 ? "Dock memo" : "Scrap note",
+    noteBody: notePick,
     description: "Something worth reading lies on the floorboards.",
   });
 
@@ -824,15 +859,18 @@ function buildToolChainRoom(
     interactable: true,
     removeBackground: true,
     kind: "switch",
-    initialOn: chainKind === 1,
-    targetOn: chainKind !== 1,
+    initialOn: switchInverted,
+    targetOn: !switchInverted,
     requires: fClueA,
     gives: fPower,
-    description: switchDesc[chainKind],
+    description: switchDesc,
   });
 
-  // -------- STEP 3: First tool (hammer or crowbar) --------
-  if (chainKind === 2) {
+  const firstBoxIsCrate = toolIdx === 1;
+  const firstNeedsKnife = toolIdx === 2;
+
+  // -------- STEP 3: First tool --------
+  if (firstBoxIsCrate) {
     objects.push({
       id: `${roomId}_step3_crowbar`,
       name: "crowbar",
@@ -851,7 +889,28 @@ function buildToolChainRoom(
       itemDisplayName: "Crowbar",
       itemEmoji: "🛠️",
       toolKind: "crowbar",
-      description: "A pry bar — looks perfect for splintering cheap wood.",
+      description: "A pry bar — for nailed wood and stubborn lids.",
+    });
+  } else if (firstNeedsKnife) {
+    objects.push({
+      id: `${roomId}_step3_knife`,
+      name: "knife",
+      prompt: `${base.knifePrompt}, ${OBJ_STYLE}`,
+      x: S.knifeR.x,
+      y: S.knifeR.y,
+      width: S.knifeR.width,
+      height: S.knifeR.height,
+      collidable: false,
+      interactable: true,
+      removeBackground: true,
+      kind: "tool_item",
+      hiddenUntilFlag: fPower,
+      gives: fKnifeUp,
+      itemId: knifeId,
+      itemDisplayName: "Utility knife",
+      itemEmoji: "🔪",
+      toolKind: "knife",
+      description: "Sharp enough to slice tape and security seals.",
     });
   } else {
     objects.push({
@@ -872,12 +931,12 @@ function buildToolChainRoom(
       itemDisplayName: "Hammer",
       itemEmoji: "🔨",
       toolKind: "hammer",
-      description: "Heavy enough to shatter whatever is pretending to be display glass.",
+      description: "Heavy head — meant for glass, not finesse.",
     });
   }
 
-  // -------- STEP 4: First breakable (glass case OR wooden crate) --------
-  if (chainKind === 2) {
+  // -------- STEP 4: First breakable --------
+  if (firstBoxIsCrate) {
     objects.push({
       id: `${roomId}_step4_crate`,
       name: "crate",
@@ -892,7 +951,7 @@ function buildToolChainRoom(
       kind: "breakable",
       needsToolKind: "crowbar",
       gives: fCrate,
-      description: "A nailed crate. Whatever is inside rattles when you kick it.",
+      description: "Wood and nails — something inside shifts when you shake it.",
     });
   } else {
     objects.push({
@@ -907,13 +966,17 @@ function buildToolChainRoom(
       interactable: true,
       removeBackground: true,
       kind: "breakable",
-      needsToolKind: "hammer",
+      needsToolKind: firstNeedsKnife ? "knife" : "hammer",
       gives: fGlass,
-      description: "A reinforced display case. Something glints behind the glass.",
+      description: firstNeedsKnife
+        ? "Tape and glass — a careful cut should free what's inside."
+        : "Reinforced glass — brute force might be the only language it understands.",
     });
   }
 
-  // -------- STEP 5: Screwdriver (hidden until first container opens) --------
+  const firstOpenFlag = firstBoxIsCrate ? fCrate : fGlass;
+
+  // -------- STEP 5: Screwdriver --------
   objects.push({
     id: `${roomId}_step5_screwdriver`,
     name: "screwdriver",
@@ -926,17 +989,17 @@ function buildToolChainRoom(
     interactable: true,
     removeBackground: true,
     kind: "tool_item",
-    hiddenUntilFlag: chainKind === 2 ? fCrate : fGlass,
+    hiddenUntilFlag: firstOpenFlag,
     gives: fSd,
     itemId: screwdriverId,
     itemDisplayName: "Screwdriver",
     itemEmoji: "🪛",
     toolKind: "screwdriver",
-    description: "Precision driver — the vent screws look exactly its size.",
+    description: "Tiny screws somewhere still stand between you and the stash.",
   });
 
-  // -------- STEP 6: Second breakable (vent OR briefcase) --------
-  if (chainKind === 1) {
+  // -------- STEP 6: Second breakable --------
+  if (useBrief) {
     objects.push({
       id: `${roomId}_step6_briefcase`,
       name: "briefcase",
@@ -951,7 +1014,7 @@ function buildToolChainRoom(
       kind: "breakable",
       needsToolKind: "screwdriver",
       gives: fVent,
-      description: "A travel case with tiny torque screws — ridiculous, but it's sealed.",
+      description: "A case screwed shut — travel gear hiding in plain sight.",
     });
   } else {
     objects.push({
@@ -968,19 +1031,23 @@ function buildToolChainRoom(
       kind: "breakable",
       needsToolKind: "screwdriver",
       gives: fVent,
-      description: "A wall vent — whoever hid the exit route loved sheet metal.",
+      description: "Wall vent — classic hidey-hole behind four screws.",
     });
   }
 
   const noteBBodyClassic = isLast
     ? `Final seal — four letters:\n\n    ${letterCode}\n\nSlot the key, then dial the word.`
     : `Door keypad — four digits:\n\n    ${code}\n\nUse the key first, then punch the code.`;
-  const noteBBodyInverted = isLast
-    ? `Letters for the exit dial:\n\n    ${letterCode}\n\nThey only glow once the case is cracked.`
-    : `Numeric override:\n\n    ${code}\n\nThe keypad stays blind until the case is cracked.`;
+  const noteBBodyBrief = isLast
+    ? `Letters for the exit dial:\n\n    ${letterCode}\n\nThey surface once the sealed case opens.`
+    : `Numeric override:\n\n    ${code}\n\nTyped after the case gives up its guts.`;
   const noteBBodyCrate = isLast
     ? `Rune word for the last lock:\n\n    ${letterCode}\n\nKey first, then the word.`
-    : `Access code after the crate split:\n\n    ${code}\n\nKey first, then the digits.`;
+    : `Access code after the crate splits:\n\n    ${code}\n\nKey first, then the digits.`;
+
+  const noteBBody =
+    useBrief ? noteBBodyBrief : firstBoxIsCrate ? noteBBodyCrate : noteBBodyClassic;
+  const noteTitle = useBrief ? "Case insert" : firstBoxIsCrate ? "Packing slip" : "Cipher scrap";
 
   // -------- STEP 7a: Coded note --------
   objects.push({
@@ -1000,8 +1067,8 @@ function buildToolChainRoom(
     itemId: noteBId,
     itemDisplayName: "Coded slip",
     itemEmoji: "📜",
-    noteTitle: chainKind === 1 ? "Case lining" : chainKind === 2 ? "Packing slip" : "Cipher scrap",
-    noteBody: chainKind === 1 ? noteBBodyInverted : chainKind === 2 ? noteBBodyCrate : noteBBodyClassic,
+    noteTitle,
+    noteBody: noteBBody,
     description: "Whatever was hidden behind the last barrier left instructions.",
   });
 
@@ -1071,16 +1138,11 @@ function buildToolChainRoom(
       ? `You enter the final room: the ${base.rooms[i]}. Freedom is close.`
       : `You step into the ${base.rooms[i]}. The deeper you go, the stranger it gets.`;
 
-  const chainLabels: Record<ChainKind, string> = {
-    0: "Classic lab chain: note → breaker → hammer → glass → driver → vent → cipher → key → lock.",
-    1: "Inverted power chain: note → flip breaker OFF → hammer → glass → driver → locked case → stash → key → lock.",
-    2: "Cargo bay chain: note → power → crowbar → nailed crate → driver → vent → stash → key → lock.",
-  };
-
+  const toolName = firstBoxIsCrate ? "crowbar→crate" : firstNeedsKnife ? "knife→glass" : "hammer→glass";
+  const secondName = useBrief ? "screwdriver→case" : "screwdriver→vent";
   const chainIntro = [
-    `Room script ${chainKind + 1}/3 (seed ${globalSeed >>> 0}):`,
-    chainLabels[chainKind],
-    "Equip tools from the Items bar, click matching props, then finish on the door lock.",
+    `Workflow #${chainKind + 1}/12 (seed ${globalSeed >>> 0}): note → ${switchInverted ? "breaker OFF" : "breaker ON"} → ${toolName} → ${secondName} → read code → key → door lock.`,
+    "Equip a tool, click the matching prop, then use the key on the lock before entering the code or word.",
   ].join("\n");
 
   return {

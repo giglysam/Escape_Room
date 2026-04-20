@@ -34,17 +34,22 @@ export async function readJson<T = unknown>(req: VercelRequest): Promise<T> {
 export async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  retries = 3,
-  backoffMs = 800,
+  retries = 5,
+  backoffMs = 600,
 ): Promise<Response> {
   let lastErr: unknown;
   for (let i = 0; i < retries; i++) {
     try {
       const r = await fetch(url, init);
-      if (r.ok || (r.status >= 400 && r.status < 500 && r.status !== 429)) {
+      if (r.ok) return r;
+      // Retry on rate limit / transient server errors
+      if (r.status === 429 || r.status === 503 || r.status === 502) {
+        lastErr = new Error(`HTTP ${r.status}`);
+      } else if (r.status >= 400 && r.status < 500) {
         return r;
+      } else {
+        lastErr = new Error(`HTTP ${r.status}`);
       }
-      lastErr = new Error(`HTTP ${r.status}`);
     } catch (e) {
       lastErr = e;
     }

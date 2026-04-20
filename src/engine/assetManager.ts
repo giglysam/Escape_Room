@@ -172,7 +172,8 @@ function placeholder(
 /** Maximum simultaneous in-flight generation requests. Chosen to be small
  * enough to dodge per-IP throttling but large enough to massively shorten the
  * loading screen vs serial. */
-const GEN_CONCURRENCY = 5;
+/** Lower concurrency reduces upstream 429s when each call uses a fresh session. */
+const GEN_CONCURRENCY = 3;
 
 export async function loadPlanAssets(
   plan: GamePlan,
