@@ -1,6 +1,10 @@
 /**
  * Procedural escape-room plan generator.
  *
+ * Builds REM-style multi-step rooms where each room is a chain of 8
+ * concrete puzzles: find clues, pick up tools, use tools to break open
+ * containers, unlock the exit with a key + code.
+ *
  * Pure TS, no DOM / no Node deps — usable from both Vercel serverless
  * functions and the browser client (offline fallback).
  */
@@ -12,21 +16,52 @@ export interface PlanReq {
   seed?: number;
 }
 
+/**
+ * Semantic class of every scene object.
+ *
+ *   door / exit          — the way to the next room / end of game.
+ *   decoration           — pure atmosphere, no interaction.
+ *   switch               — wall toggle; flipping sets a flag.
+ *   clue_note            — a note/letter/scrap on the floor or wall;
+ *                          clicking reads it (a modal) and adds a copy
+ *                          to the inventory so it can be re-read.
+ *   tool_item            — a tool or key on the floor; clicking picks it
+ *                          up (removes from the world, adds to inv).
+ *   breakable            — a locked container/glass/vent that requires
+ *                          a matching TOOL to open. Once broken it
+ *                          vanishes and reveals its hidden children.
+ *   keyed_lock           — like breakable but needs a specific KEY
+ *                          (inventory item id), and the key is consumed.
+ *   keypad               — click → numeric keypad modal, 4 digits.
+ *   letter_lock          — click → 4-letter dial modal.
+ *   pedestal             — altar; accept one or more inventory items.
+ *   sequence_button / sequence_clue — kept for legacy callers but unused.
+ *   switch_clue          — legacy, unused.
+ *   item                 — legacy, unused (replaced by tool_item).
+ */
 export type ObjectKind =
   | "door"
   | "exit"
   | "decoration"
-  // Archetype A — Collect & Combine
-  | "item"
+  | "switch"
+  | "clue_note"
+  | "tool_item"
+  | "breakable"
+  | "keyed_lock"
+  | "keypad"
+  | "letter_lock"
   | "pedestal"
-  // Archetype B — Symbol Sequence
+  // legacy — kept only so external callers keep compiling
+  | "item"
   | "sequence_clue"
   | "sequence_button"
-  // Archetype C — Logic Switches
-  | "switch"
   | "switch_clue";
 
-export type PuzzleArchetype = "collect" | "sequence" | "switches";
+/**
+ * Tools the engine understands. A `breakable` with `needsToolKind: "hammer"`
+ * is opened by a `tool_item` with `toolKind: "hammer"`.
+ */
+export type ToolKind = "hammer" | "screwdriver" | "knife" | "crowbar" | "key";
 
 export interface RoomObject {
   id: string;
@@ -40,31 +75,68 @@ export interface RoomObject {
   interactable: boolean;
   removeBackground: boolean;
   kind: ObjectKind;
-  /** Items needed to interact (e.g. a door waiting for a key flag). */
+
+  /**
+   * Flag that must be set (OR an inventory item id that must be held)
+   * before this object can be used. If missing, the engine shows a
+   * themed toast and no-ops.
+   */
   requires?: string;
-  /** Item id given to the player on use (collected items). */
+  /** Flag this object emits on successful use. */
   gives?: string;
-  /** Description shown in info popup. */
+  /** Description shown in info popups / modal headers. */
   description?: string;
-  /** Hint shown after a wrong attempt. */
+  /** Hint shown after a wrong attempt (kept for future use). */
   hint?: string;
+  /**
+   * If set, this object is invisible AND non-interactable until the
+   * flag is present in GameState.flags. Used to hide children of a
+   * breakable / keyed_lock until it's been opened.
+   */
+  hiddenUntilFlag?: string;
 
-  // ---- Archetype-specific data ----
+  // ---------------- Inventory item metadata ----------------
+  //
+  // These fields describe "what the player receives" when they click
+  // a tool_item or a clue_note. The inventory stores the itemId; the
+  // display name / emoji / description let the UI render a pretty tile.
 
-  /** sequence_clue / sequence_button / switch_clue / pedestal — the symbol shown. */
+  /** Unique inventory id — e.g. `hammer_r0`, `key_r1`, `note_a_r0`. */
+  itemId?: string;
+  /** User-facing name — e.g. "Hammer", "Brass Key", "Crumpled Note". */
+  itemDisplayName?: string;
+  /** Emoji for the inventory tile. */
+  itemEmoji?: string;
+  /** Category of tool, used to match breakables. */
+  toolKind?: ToolKind;
+
+  // ---------------- Break / lock / code data ----------------
+
+  /** `breakable`: kind of tool needed to break it open. */
+  needsToolKind?: ToolKind;
+  /** `keyed_lock`: inventory itemId required. Key is consumed. */
+  needsKeyItemId?: string;
+  /** `keypad`/`letter_lock`: the correct code (e.g. "7413" or "MOON"). */
+  codeAnswer?: string;
+  /** `keypad`/`letter_lock`: length of the code. */
+  codeLength?: number;
+  /** `letter_lock` only. */
+  isLetters?: boolean;
+
+  // ---------------- Note / clue data ----------------
+
+  /** `clue_note`: the full text the modal displays. */
+  noteBody?: string;
+  /** `clue_note`: short label shown on the inventory tile ("Note A"). */
+  noteTitle?: string;
+
+  // ---------------- Legacy archetype fields (unused by new rooms) ----------------
   symbol?: string;
-  /** sequence_button: which slot in the sequence this button represents (0..n). */
   symbolIndex?: number;
-  /** switch: 0/1 = currently on/off (initial state). */
   initialOn?: boolean;
-  /** switch: must this switch be ON in the target pattern? */
   targetOn?: boolean;
-  /** pedestal: list of item ids that must be deposited (any order). */
   acceptsItems?: string[];
-  /** sequence_clue: the full ordered list of symbols. */
   sequenceSymbols?: string[];
-  /** Which puzzle archetype this object belongs to. */
-  puzzle?: PuzzleArchetype;
 }
 
 export interface RoomPlan {
@@ -80,15 +152,9 @@ export interface GamePlan {
   title: string;
   story: string;
   difficulty: string;
-  /**
-   * Section 1 of the blueprint — Core Concept & Narrative.
-   * These fields are used by the briefing screen, the persistent objective
-   * banner, and the timeout / lose-state messaging.
-   */
   mission: string;
   hook: string;
   stakes: string;
-  /** Total seconds available to escape across all rooms. */
   timeLimitSec: number;
   rooms: RoomPlan[];
 }
@@ -118,38 +184,42 @@ function pick<T>(rng: () => number, arr: T[]): T {
   return arr[Math.floor(rng() * arr.length)]!;
 }
 
-/** Unicode glyphs we use for the on-screen symbol sequence puzzle. They are
- * deliberately abstract so they read as "ancient runes / glyphs / sigils"
- * regardless of theme. */
-// (Hardcoded sequence pool now lives inside buildChainedRoom for the
-// optional 4-button sequence lock at step 7.)
-
 interface ThemeDef {
   title: string;
   story: string;
-  /** Mission / Hook / Stakes per the blueprint section 1. */
   mission: string;
   hook: string;
   stakes: string;
-  /** Background prompts per room (full scene including environment). */
+  /** One background prompt per room. */
   bgs: string[];
   /** Display name per room. */
   rooms: string[];
   ambient: string[];
-  /** Prompt fragment for the door object (per room). */
+  /** Door prompt per room. */
   doorPrompts: string[];
-  /** Pool of small thematic decoration objects (never buildings). */
+  /** Wall decoration pool — purely atmospheric. */
   decoStyles: string[];
-  // ---- Archetype-specific theme prompts ----
-  /** A — Collect & Combine: 3 thematic items + the pedestal/altar that accepts them. */
-  itemPrompts: string[];
-  pedestalPrompt: string;
-  /** B — Sequence: a wall mural showing symbols, plus a generic button look. */
-  muralPrompt: string;
-  buttonPrompt: string;
-  /** C — Switches: a wall switch and the deco object whose surface holds the clue. */
+
+  /** Prompt for the first crumpled note found on the floor. */
+  noteAPrompt: string;
+  /** Prompt for the note found inside the glass case. */
+  noteBPrompt: string;
+  /** Prompt for the wall switch. */
   switchPrompt: string;
-  cluePropPrompt: string;
+  /** Prompt for a glass display case mounted on the wall. */
+  glassCasePrompt: string;
+  /** Prompt for an air vent / grate on the wall. */
+  ventPrompt: string;
+  /** Prompt for a locked metal briefcase on the floor. */
+  briefcasePrompt: string;
+  /** Prompt for the hammer cutout. */
+  hammerPrompt: string;
+  /** Prompt for the screwdriver cutout. */
+  screwdriverPrompt: string;
+  /** Prompt for the knife cutout (unused in baseline, reserved). */
+  knifePrompt: string;
+  /** Prompt for a brass key cutout. */
+  keyPrompt: string;
 }
 
 const BG_STYLE =
@@ -162,7 +232,8 @@ const THEMES: ThemeDef[] = [
       "You wake inside a rogue AI research lab. Self-destruct in T-minus unknown. Find the override codes and escape before the neural core melts down.",
     mission: "Reach the surface airlock before the neural core melts down.",
     hook: "An encrypted ping woke you in cold storage. The lab is on emergency power, the AI is still online, and only the maintenance corridors are unlocked.",
-    stakes: "If you fail, the core breaches and the entire research wing — and you with it — is reduced to slag.",
+    stakes:
+      "If you fail, the core breaches and the entire research wing — and you with it — is reduced to slag.",
     bgs: [
       `dark futuristic AI laboratory wall and floor, glowing blue panel textures on the back wall, polished metal floor, holographic ambient particles, completely empty room interior, ${BG_STYLE}`,
       `abandoned cyberpunk server room wall and floor, red emergency rim lighting, tangled fiber-optic light traces glowing on the wall, dusty metal grating floor, completely empty room interior, ${BG_STYLE}`,
@@ -179,31 +250,30 @@ const THEMES: ThemeDef[] = [
       "small vintage desktop server tower with blinking LEDs",
       "small tangle of fiber optic cables glowing blue",
       "broken holographic projector device",
-      "lab beaker with glowing liquid",
-      "discarded VR headset",
     ],
-    itemPrompts: [
-      "small glowing blue power core cell, sci-fi",
-      "small fingerprint authentication chip, sci-fi",
-      "small holographic memory crystal, sci-fi",
-    ],
-    pedestalPrompt:
-      "futuristic metallic console pedestal with three empty circular slots glowing blue, sci-fi",
-    muralPrompt:
-      "futuristic wall display screen showing a glowing sequence of four ancient symbols, sci-fi",
-    buttonPrompt: "small futuristic backlit hexagonal symbol button with glowing edges, sci-fi",
+    noteAPrompt: "crumpled futuristic paper note with handwritten ink",
+    noteBPrompt: "folded data card with a short handwritten four-digit sequence",
     switchPrompt:
       "industrial wall mounted heavy duty toggle switch with red and green indicator light, sci-fi",
-    cluePropPrompt:
-      "small futuristic data tablet displaying a wiring diagram of switches, sci-fi",
+    glassCasePrompt:
+      "small wall-mounted reinforced glass display case containing a tool, sci-fi",
+    ventPrompt:
+      "rectangular wall-mounted metal air vent grate with four visible screws, sci-fi",
+    briefcasePrompt: "small scuffed metal briefcase with a combination lock, sci-fi",
+    hammerPrompt: "small heavy rubber grip claw hammer",
+    screwdriverPrompt: "small phillips head screwdriver with a yellow handle",
+    knifePrompt: "small utility knife with a retractable blade",
+    keyPrompt: "small brass door key with a round bow",
   },
   {
     title: "Beirut Antiquarian Heist",
     story:
       "You're locked in a forgotten antique shop in old Beirut. Lebanese mosaics hide ancient mechanisms. Crack them before dawn or be sealed in forever.",
     mission: "Reach the rooftop courtyard before the call to dawn prayer.",
-    hook: "The collector who hired you vanished an hour ago. The shop's door bolted itself the moment you stepped inside, and the mosaics on the walls have started glowing.",
-    stakes: "At first light the building's ancient lock-stones fuse permanently — you stay buried with the artifacts forever.",
+    hook:
+      "The collector who hired you vanished an hour ago. The shop's door bolted itself the moment you stepped inside, and the mosaics on the walls have started glowing.",
+    stakes:
+      "At first light the building's ancient lock-stones fuse permanently — you stay buried with the artifacts forever.",
     bgs: [
       `interior wall and floor of an old Beirut antique shop, dusty hand-painted wall plaster, faded patterned tile floor, warm amber lamplight from off-screen, completely empty room interior, ${BG_STYLE}`,
       `interior wall and floor of a phoenician hidden chamber, hand-carved stone wall with weathered glyph textures, smooth flagstone floor, flickering torchlight from off-screen, completely empty room interior, ${BG_STYLE}`,
@@ -220,30 +290,28 @@ const THEMES: ThemeDef[] = [
       "ornate ottoman oil lamp glowing",
       "stack of dusty old leather books",
       "brass arabian teapot",
-      "small persian carpet rolled up",
-      "engraved silver tray",
     ],
-    itemPrompts: [
-      "small ornate brass key with arabic engraving, antique",
-      "small phoenician bronze coin with engraved markings, antique",
-      "small carved cedar wood amulet, antique",
-    ],
-    pedestalPrompt:
-      "ornate stone altar pedestal with three empty engraved indentations on top, antique middle eastern style",
-    muralPrompt:
-      "ancient stone wall mural with a row of four carved phoenician symbols glowing softly, antique",
-    buttonPrompt: "small carved brass button with a single engraved phoenician symbol, antique",
+    noteAPrompt: "yellowed torn parchment with handwritten arabic ink",
+    noteBPrompt: "small folded parchment with a four-digit numeric inscription",
     switchPrompt:
       "antique brass wall lever with two positions and an engraved indicator, ornate ottoman style",
-    cluePropPrompt:
-      "old yellowed parchment scroll showing a row of four levers with some highlighted, antique ink drawing",
+    glassCasePrompt:
+      "small wall-mounted antique glass museum display case containing a tool, ornate wooden frame",
+    ventPrompt:
+      "rectangular wall-mounted ornamental brass grille with four visible screws",
+    briefcasePrompt: "small worn leather travel case with a brass combination dial",
+    hammerPrompt: "small antique iron blacksmith hammer with a worn wooden handle",
+    screwdriverPrompt: "small antique brass flathead screwdriver with a wooden handle",
+    knifePrompt: "small ornate ottoman letter opener with an engraved blade",
+    keyPrompt: "small ornate ottoman brass skeleton key",
   },
   {
     title: "Derelict Starship Sigma",
     story:
       "Cryo-sleep failed. The starship Sigma is silent and the airlock is sealed. Reroute power, override the captain's lock, reach the escape pod.",
     mission: "Reach Escape Pod Bay 3 before life support runs out.",
-    hook: "Your cryo-pod popped open hours after the rest of the crew vanished. Comms are dead. The ship is drifting toward a star, and atmospheric pressure is dropping by the minute.",
+    hook:
+      "Your cryo-pod popped open hours after the rest of the crew vanished. Comms are dead. The ship is drifting toward a star, and atmospheric pressure is dropping by the minute.",
     stakes: "Fail and the hull boils away as Sigma falls into the corona — you are vapor.",
     bgs: [
       `interior wall and floor of a derelict spaceship corridor, riveted metal hull walls, scuffed grated floor, flickering cool ceiling light from off-screen, floating dust particles, completely empty corridor interior, ${BG_STYLE}`,
@@ -261,31 +329,30 @@ const THEMES: ThemeDef[] = [
       "broken engineering helmet",
       "sparking power conduit segment",
       "floating zero-gravity coffee mug",
-      "small portable oxygen tank",
-      "discarded clipboard with technical schematics",
     ],
-    itemPrompts: [
-      "small spaceship plasma fuse cylinder, sci-fi",
-      "small captain access keycard, sci-fi",
-      "small spaceship coolant capsule, sci-fi",
-    ],
-    pedestalPrompt:
-      "spaceship engineering console pedestal with three empty receptacle slots, sci-fi",
-    muralPrompt:
-      "spaceship wall display screen showing a glowing sequence of four navigation symbols, sci-fi",
-    buttonPrompt: "small spaceship console button with a single glowing symbol, sci-fi",
+    noteAPrompt: "crumpled paper log torn from a mission logbook",
+    noteBPrompt: "folded control panel schematic with a four-digit override code",
     switchPrompt:
       "spaceship wall mounted breaker switch with status LED, industrial sci-fi",
-    cluePropPrompt:
-      "small data tablet displaying a circuit breaker diagram with some breakers highlighted, sci-fi",
+    glassCasePrompt:
+      "small wall-mounted reinforced glass equipment case containing a tool, sci-fi",
+    ventPrompt:
+      "rectangular spaceship wall air vent grate with four visible hex screws, sci-fi",
+    briefcasePrompt: "small pressurised equipment case with a keypad, sci-fi",
+    hammerPrompt: "small emergency rubber mallet with a yellow handle",
+    screwdriverPrompt: "small hex screwdriver with a black grip",
+    knifePrompt: "small utility blade with a stainless steel sheath",
+    keyPrompt: "small magnetic command key card on a lanyard",
   },
   {
     title: "Witch's Mountain Cabin",
     story:
       "You sheltered from a storm in a cabin that locked behind you. Old runes and bubbling potions hint at a way out — if you can read them in time.",
     mission: "Reach the forest gate before the witch returns from her hunt.",
-    hook: "The storm chased you into a cabin you didn't choose. The door slammed itself shut and the candles lit themselves the moment you crossed the threshold.",
-    stakes: "When the witch comes home she'll add you to her shelf of curiosities — labelled and preserved.",
+    hook:
+      "The storm chased you into a cabin you didn't choose. The door slammed itself shut and the candles lit themselves the moment you crossed the threshold.",
+    stakes:
+      "When the witch comes home she'll add you to her shelf of curiosities — labelled and preserved.",
     bgs: [
       `interior wall and floor of an old witch wooden cabin, weathered timber plank wall, dusty wooden floor, warm flickering candlelight from off-screen, drifting smoke, completely empty cabin interior, ${BG_STYLE}`,
       `interior wall and floor of a stone cellar under a witch cabin, damp moss-covered stone wall, runic circle softly glowing on the stone floor, faint green torchlight, completely empty cellar interior, ${BG_STYLE}`,
@@ -302,46 +369,28 @@ const THEMES: ThemeDef[] = [
       "bubbling green potion bottle",
       "old wooden broomstick",
       "stack of spellbooks bound in leather",
-      "wooden cauldron with smoke",
-      "skull candle holder",
     ],
-    itemPrompts: [
-      "small glowing red potion vial with a cork stopper",
-      "small carved bone rune talisman",
-      "small dried herb bundle tied with twine",
-    ],
-    pedestalPrompt:
-      "old wooden ritual pedestal with three empty engraved circles on top, mystical witch style",
-    muralPrompt:
-      "old wooden plank wall with four glowing carved runes in a row, mystical",
-    buttonPrompt: "small carved wooden button with a single glowing rune, mystical",
+    noteAPrompt: "old torn yellow parchment with hand-scrawled ink runes",
+    noteBPrompt: "folded scrap of parchment with a four-letter word carved into it",
     switchPrompt:
       "old iron wall lever with a glowing rune indicator, mystical witch style",
-    cluePropPrompt:
-      "old torn parchment showing a row of four levers with some highlighted, witch ink drawing",
+    glassCasePrompt:
+      "small wall-mounted glass reliquary case containing a tool, witch style",
+    ventPrompt:
+      "rectangular wall-mounted wooden grate with four visible iron screws, witch style",
+    briefcasePrompt: "small weathered wooden chest with iron bands",
+    hammerPrompt: "small blacksmith iron hammer with a wooden handle",
+    screwdriverPrompt: "small antique iron flathead screwdriver with a wooden handle",
+    knifePrompt: "small ornate ritual silver athame knife with a carved handle",
+    keyPrompt: "small ornate iron skeleton key with a ring bow",
   },
 ];
 
 /**
- * Build a ThemeDef on the fly from a freeform user theme. The whole story,
- * backgrounds, props and decor are phrased in terms of the theme — never
- * hard-coded as a "lab" or "cabin".
- */
-/**
  * Builds a deeply theme-driven `ThemeDef` from a freeform user phrase.
- *
- * The goal is total immersion — every prompt is phrased so the model
- * treats `{theme}` as the *entire world* the player is inside, not just a
- * decorative motif. Per-room sub-locations create a sense of journey
- * (entrance → heart → exit), every prop wears the theme's vocabulary,
- * and the background prompts are atmospheric-only (no doors, no props).
  */
 function buildCustomTheme(theme: string): ThemeDef {
   const t = theme.trim();
-
-  // A reusable "vibe pack" we can sprinkle into prompts to amplify
-  // immersion. The model picks up multi-sensory cues much better when
-  // we mention textures, materials, smells, and lighting.
   const vibe = (room: "entrance" | "heart" | "exit") => {
     const moodWords =
       room === "entrance"
@@ -352,7 +401,7 @@ function buildCustomTheme(theme: string): ThemeDef {
     return [
       `everything in this scene must feel like it truly belongs to the world of ${t}`,
       `materials, textures, color palette, lighting and mood are 100% derived from ${t}`,
-      `atmospheric depth, painterly background art, cinematic concept art quality`,
+      "atmospheric depth, painterly background art, cinematic concept art quality",
       moodWords,
     ].join(", ");
   };
@@ -365,50 +414,37 @@ function buildCustomTheme(theme: string): ThemeDef {
     stakes: `If the timer hits zero, the world of ${t} closes around you forever and you become part of it.`,
     rooms: [`Threshold of ${t}`, `Heart of ${t}`, `Way Out of ${t}`],
     ambient: ["#0c0c18", "#180c10", "#0a1018"],
-
-    // Backgrounds describe ONLY the empty themed environment. No doors,
-    // no furniture, no props. Cutouts will be placed on top.
     bgs: [
       `the threshold of the world of ${t}, completely empty room interior with only the back wall and floor visible, walls and floor textures fully derived from ${t}, ${vibe("entrance")}, ${BG_STYLE}`,
       `the heart of the world of ${t}, completely empty room interior with only the back wall and floor visible, walls and floor textures fully derived from ${t}, ${vibe("heart")}, ${BG_STYLE}`,
       `the way out of the world of ${t}, completely empty room interior with only the back wall and floor visible, walls and floor textures fully derived from ${t}, ${vibe("exit")}, ${BG_STYLE}`,
     ],
-
     doorPrompts: [
       `tall closed door entirely made of materials and motifs from the world of ${t}, every surface, color and detail is unmistakably ${t}`,
       `heavy decorated door entirely made of materials and motifs from the world of ${t}, ornate, every detail screams ${t}`,
       `tall final exit door entirely made of materials and motifs from the world of ${t}, glowing edges, every detail unmistakably ${t}`,
     ],
-
     decoStyles: [
       `iconic small object that immediately reads as ${t}`,
       `small everyday prop that someone living inside the world of ${t} would own`,
       `small symbolic relic of ${t}`,
-      `small ambient light source styled in the visual language of ${t}`,
-      `small atmospheric prop made from materials specific to ${t}`,
     ],
-    itemPrompts: [
-      `small ritual offering number one, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
-      `small ritual offering number two, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
-      `small ritual offering number three, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
-      `small ritual offering number four, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
-      `small ritual offering number five, made entirely from materials and motifs of ${t}, instantly recognizable as ${t}`,
-    ],
-    pedestalPrompt: `ornate pedestal or altar with empty receptacles on top, the entire pedestal is sculpted from materials and motifs of ${t}, every detail unmistakably ${t}`,
-    muralPrompt: `wall plaque showing a sequence of glowing symbols, the plaque material and the symbols themselves are pulled from the visual language of ${t}`,
-    buttonPrompt: `small push button with a single glowing symbol, button materials and the symbol art are pulled from the visual language of ${t}`,
-    switchPrompt: `wall mounted toggle switch or lever with a status indicator, the switch is sculpted from materials of ${t}, fits the world of ${t}`,
-    cluePropPrompt: `small handheld diagram showing several switch positions, the diagram surface and ink/etching style are from ${t}`,
+    noteAPrompt: `small crumpled paper note, the paper texture and ink match the world of ${t}`,
+    noteBPrompt: `small folded note with a four-character code written on it, paper and ink materials from the world of ${t}`,
+    switchPrompt: `wall mounted toggle switch sculpted from materials of ${t}, fits the world of ${t}`,
+    glassCasePrompt: `small wall-mounted glass display case containing a tool, frame materials from the world of ${t}`,
+    ventPrompt: `small wall-mounted grate with four visible screws, materials from the world of ${t}`,
+    briefcasePrompt: `small locked portable case with a combination lock, made from materials of ${t}`,
+    hammerPrompt: `small hammer whose materials and handle come from the world of ${t}`,
+    screwdriverPrompt: `small screwdriver whose materials come from the world of ${t}`,
+    knifePrompt: `small hand knife whose materials come from the world of ${t}`,
+    keyPrompt: `small ornate key whose shape and material are unmistakably ${t}`,
   };
 }
 
 export const PLAN_CANVAS = { width: W, height: H, floorTop: FLOOR_TOP };
 
-/**
- * REM / Room Escape Maker style: every object is authored in integer
- * 1280×720 plan pixels (top-left origin). `width`/`height` are the
- * interaction box; sprites are aspect-fitted inside that box in the engine.
- */
+/** Integer plan-space rectangle for 1280×720 REM-style placement. */
 function pxRect(x: number, y: number, width: number, height: number) {
   return {
     x: Math.round(x),
@@ -427,38 +463,28 @@ const OBJ_STYLE =
   "no people, no creatures, no text, no logos, " +
   "ultra detailed, sharp focus, even lighting";
 
+// ===============================================================
+// Public API
+// ===============================================================
+
 export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
   const seed = req.seed ?? Math.floor(Math.random() * 1e9);
   const rng = mulberry32(seed);
 
-  // When the user typed a theme we synthesise a fully theme-driven ThemeDef
-  // so backgrounds, doors, keypad, container, note and decor are ALL phrased
-  // in terms of their theme — never leak in a default lab/cabin look.
   const base: ThemeDef = req.theme ? buildCustomTheme(req.theme) : pick(rng, THEMES);
   const titleOverride = base.title;
 
   const numRooms = Math.max(2, Math.min(3, req.rooms ?? 3));
 
-  // Pick a starting archetype, then rotate so every room is mechanically
-  // different. With 3 rooms each playthrough hits all three archetypes.
-  const ARCHETYPES: PuzzleArchetype[] = ["collect", "sequence", "switches"];
-  const startArch = randInt(rng, 0, ARCHETYPES.length - 1);
-
   const rooms: RoomPlan[] = [];
   for (let i = 0; i < numRooms; i++) {
-    const arch = ARCHETYPES[(startArch + i) % ARCHETYPES.length]!;
-    const room = buildRoom(rng, base, i, numRooms, arch);
-    // Rewrite the room's background prompt so the AI is told EXACTLY where
-    // every prop sits — no more "two doors" / "cup on the floor" mismatches.
-    room.background_prompt = composeBackgroundPrompt(room, base, i, numRooms);
+    const room = buildToolChainRoom(rng, base, i, numRooms);
+    room.background_prompt = composeBackgroundPrompt(room, base, i);
     rooms.push(room);
   }
 
-  // Difficulty → time budget. Easier runs give more thinking time. The
-  // blueprint says easy start, hard middle, adrenaline finish — the timer
-  // creates the climax automatically.
   const difficulty = req.difficulty ?? "normal";
-  const baseSeconds = difficulty === "easy" ? 540 : difficulty === "hard" ? 300 : 420;
+  const baseSeconds = difficulty === "easy" ? 720 : difficulty === "hard" ? 480 : 600;
 
   return {
     title: titleOverride,
@@ -473,41 +499,12 @@ export function generateProceduralPlan(req: PlanReq = {}): GamePlan {
 }
 
 // ===============================================================
-// Background-prompt composer — encodes object positions into the
-// background prompt so the AI paints them in the right places. The
-// in-game cutouts then sit ON TOP of what the AI painted, so the door
-// hotspot covers the painted door (no "two doors"), the keypad sits
-// over the painted keypad, etc.
+// Background prompt — always empty themed room, no painted props.
 // ===============================================================
 
-/**
- * NEW POLICY (no more "two doors" bug):
- *
- * The background image must be a COMPLETELY EMPTY themed environment —
- * no doors, no switches, no keypads, no pedestals, no chests, no notes,
- * no levers, no buttons, no machinery. Every gameplay-meaningful object
- * is generated as a separate transparent cutout and placed on top.
- *
- * The background's only job is atmosphere: a back wall + a floor + the
- * theme's textures, materials, lighting, and mood. The cutout props
- * provide the door, the keypad, etc., so we can place them precisely and
- * the player never sees a "ghost" door painted into the background.
- */
-
-function composeBackgroundPrompt(
-  room: RoomPlan,
-  base: ThemeDef,
-  i: number,
-  _numRooms: number,
-): string {
-  void _numRooms;
-
-  // Use the theme's prose background as the world flavour, but strip any
-  // wording that might cause the model to paint props.
+function composeBackgroundPrompt(room: RoomPlan, base: ThemeDef, i: number): string {
   const sceneBase = base.bgs[i] ?? base.bgs[0]!;
 
-  // Encode the exact compositional grid so the painter keeps plain
-  // wall/floor texture where cutouts will sit (no ghost doors/buttons).
   const placementHints = room.objects
     .map((o) => {
       const cx = Math.round(o.x + o.width / 2);
@@ -517,9 +514,6 @@ function composeBackgroundPrompt(
     })
     .join("; ");
 
-  // Strong, repeated negatives to enforce an empty room. The model
-  // weights repeated tokens, so we list the same forbidden category in
-  // multiple ways.
   const forbidden = [
     "completely empty room",
     "no door",
@@ -553,14 +547,14 @@ function composeBackgroundPrompt(
     "no note",
     "no item on the floor",
     "no people",
-    "no characters",
     "no creatures",
-    "no animals",
     "no text",
     "no logos",
     "no symbols",
     "no UI",
     "no HUD",
+    "no animals",
+    "no characters",
   ].join(", ");
 
   return [
@@ -571,7 +565,7 @@ function composeBackgroundPrompt(
     `straight-on 2D side-scrolling camera, fixed ${W}x${H} pixel frame, origin top-left (0,0), bottom-right (${W},${H})`,
     `vertical split: y=0..${FLOOR_TOP - 1} is back wall; y=${FLOOR_TOP}..${H - 1} is floor — keep those regions continuous texture only`,
     placementHints
-      ? `Leave these volumes as uninterrupted wall/floor paint only (separate PNG cutouts will be placed exactly on top): ${placementHints}`
+      ? `Leave these volumes as uninterrupted wall/floor paint only (PNG cutouts placed exactly on top): ${placementHints}`
       : "",
     forbidden,
   ]
@@ -580,7 +574,7 @@ function composeBackgroundPrompt(
 }
 
 // ===============================================================
-// Room builders — one per puzzle archetype
+// Room builders
 // ===============================================================
 
 interface RoomLayout {
@@ -597,11 +591,10 @@ function makeLayout(): RoomLayout {
   const WALL_TOP = 120;
   const WALL_BOT = FLOOR_TOP - 10;
   const FLOOR_BOT = H - 30;
-  // REM-style door: tall, base sits on the floor (door bottom = FLOOR_BOT)
   const doorW = 200;
   const doorH = 440;
   const doorX = Math.round(W - doorW - 60);
-  const doorY = Math.round(FLOOR_BOT - doorH); // bottom of door touches the floor band
+  const doorY = Math.round(FLOOR_BOT - doorH);
   return { WALL_TOP, WALL_BOT, FLOOR_BOT, doorX, doorY, doorW, doorH };
 }
 
@@ -630,21 +623,16 @@ function makeDoor(
     interactable: true,
     removeBackground: true,
     kind: isLast ? "exit" : "door",
-    requires: `door_${`room${i}`}_unlocked`,
+    requires: `door_room${i}_unlocked`,
     description,
   };
 }
 
-function makeWallDeco(
-  base: ThemeDef,
-  i: number,
-  layout: RoomLayout,
-): RoomObject {
+function makeWallDeco(base: ThemeDef, i: number, layout: RoomLayout): RoomObject {
   const n = base.decoStyles.length;
   const idx = n > 0 ? i % n : 0;
   const style = n > 0 ? base.decoStyles[idx]! : "small ambient prop";
-  // Fixed left-wall slot — deterministic per room index, no RNG drift.
-  const r = pxRect(20, layout.WALL_TOP + 36, 92, 132);
+  const r = pxRect(22, layout.WALL_BOT - 132, 94, 132);
   return {
     id: `room${i}_deco_wall`,
     name: "deco_wall",
@@ -660,92 +648,101 @@ function makeWallDeco(
   };
 }
 
-function buildRoom(
+/**
+ * Builds one "room" as a chain of 8 tool-based puzzles:
+ *
+ *   1. Clue note on the floor                     → flag `r_clue_a`
+ *   2. Wall switch                                → flag `r_power`
+ *   3. Hammer on the floor                        → item `hammer_ri`
+ *   4. Glass display case on the wall (hammer)    → flag `r_glass`
+ *   5. Screwdriver inside the case                → item `sd_ri`
+ *   6. Wall vent (screwdriver)                    → flag `r_vent`
+ *   7. Second note inside vent (door code)        → flag `r_code_known`
+ *      Brass key inside vent                      → item `key_ri`
+ *   8. Door (needs key + keypad code)             → flag `door_roomi_unlocked`
+ *
+ * All ids/flags are scoped per room (`r0_*`, `r1_*`, …) so flags and
+ * items from earlier rooms don't leak into later ones.
+ */
+function buildToolChainRoom(
   rng: () => number,
   base: ThemeDef,
   i: number,
   numRooms: number,
-  _arch: PuzzleArchetype,
 ): RoomPlan {
-  void _arch; // archetype is now ignored — every room is chained
   const isLast = i === numRooms - 1;
   const isFirst = i === 0;
   const roomId = `room${i}`;
   const layout = makeLayout();
 
-  // Difficulty curve: room 0 = 5 chained steps, room 1 = 6, room 2 = 7.
-  // Each step gates the next via flags, REM-style.
-  const stepCount = isFirst ? 5 : isLast ? 7 : 6;
+  // Per-room scoped item ids (engine uses these as inventory keys)
+  const hammerId = `hammer_r${i}`;
+  const screwdriverId = `screwdriver_r${i}`;
+  const keyId = `key_r${i}`;
+  const noteAId = `noteA_r${i}`;
+  const noteBId = `noteB_r${i}`;
 
-  const [objects, archIntro] = buildChainedRoom(rng, base, i, isLast, layout, stepCount);
-
-  const baseIntro = isFirst
-    ? `You wake up in the ${base.rooms[i]}. The door behind you is sealed.`
-    : isLast
-      ? `You enter the final room: the ${base.rooms[i]}. Freedom is close.`
-      : `You step into the ${base.rooms[i]}. The deeper you go, the stranger it gets.`;
-
-  return {
-    id: roomId,
-    name: base.rooms[i] ?? `Room ${i + 1}`,
-    background_prompt: base.bgs[i] ?? base.bgs[0]!,
-    ambient_color: base.ambient[i] ?? "#0a0a14",
-    objects,
-    intro: `${baseIntro}\n\n${archIntro}`,
-  };
-}
-
-// ===============================================================
-// Chained room builder — Room Escape Maker style
-// ===============================================================
-//
-// Every room is now a 5–7 step *chain* of mixed mechanics, instead of
-// one flavour of puzzle. Each step writes a flag that gates the next
-// step, exactly like REM games (Dog Escape, Halloween Nightmare, etc.).
-//
-// The chain template:
-//   1. SWITCH    — wake the room (lights on / power on / reveal)
-//   2. ITEM      — small object on the floor, revealed by step 1
-//   3. CONTAINER — chest/box on the floor, opens with item from step 2
-//   4. ITEM      — second small object, dropped from container
-//   5. PEDESTAL  — back-wall altar, needs the item from step 4
-//   6. KEY       — appears on the floor when pedestal is fed (last room only)
-//   7. DOOR      — ground-touching, opens when its prerequisite flag is set
-//
-// All `requires` / `gives` strings are scoped per room (`roomN_step_X`)
-// so flags from previous rooms never bleed into later ones.
-
-function buildChainedRoom(
-  rng: () => number,
-  base: ThemeDef,
-  i: number,
-  isLast: boolean,
-  layout: RoomLayout,
-  stepCount: number,
-): [RoomObject[], string] {
-  const roomId = `room${i}`;
-  const objects: RoomObject[] = [];
-
-  // Flag sequence: each step gives `flag_k` and the next step requires it.
-  const flag = (k: number) => `${roomId}_flag_${k}`;
+  // Per-room scoped flags
+  const fClueA = `r${i}_clue_a`;
+  const fPower = `r${i}_power`;
+  const fHammerUp = `r${i}_hammer_up`;
+  const fGlass = `r${i}_glass_broken`;
+  const fSd = `r${i}_sd_up`;
+  const fVent = `r${i}_vent_open`;
+  const fCode = `r${i}_code_known`;
+  const fKey = `r${i}_key_up`;
   const doorFlag = `door_${roomId}_unlocked`;
 
-  // ---- Fixed 1280×720 layout (REM-style integer plan coords) ----
-  const floorItemH = 58;
-  const floorItemY = Math.round(layout.FLOOR_BOT - floorItemH - 6);
-  const floorBackChestY = Math.round(layout.FLOOR_BOT - 132 - 22);
-  const floorBackPedY = Math.round(layout.FLOOR_BOT - 168 - 22);
-  const switchR = pxRect(108, layout.WALL_TOP + 78, 72, 108);
-  const item2R = pxRect(248, floorItemY, 64, floorItemH);
-  const chestR = pxRect(414, floorBackChestY, 132, 132);
-  const item4R = pxRect(548, floorItemY, 64, floorItemH);
-  const pedR = pxRect(668, floorBackPedY, 168, 168);
-  const keyR = pxRect(492, floorItemY, 64, floorItemH);
+  // Pick a 4-digit code unique per room so the same run uses the same
+  // code for the same seed.
+  const code = String(randInt(rng, 1000, 9999));
 
-  // ---- STEP 1: WALL SWITCH on the back wall ----
+  // Pick a 4-letter code for the last room's letter lock variant.
+  const WORDS = ["MOON", "STAR", "NOVA", "WARP", "LOCK", "RUNE", "DUSK", "SILK"];
+  const letterCode = WORDS[randInt(rng, 0, WORDS.length - 1)]!;
+
+  const objects: RoomObject[] = [];
+
+  // Fixed 1280×720 slots (integer plan coords) — same layout every seed.
+  const floorY = (h: number) => Math.round(layout.FLOOR_BOT - h - 4);
+  const wallMidY = () => Math.round(layout.WALL_TOP + 110);
+  const noteAR = pxRect(180, floorY(52), 62, 52);
+  const switchR = pxRect(102, wallMidY() - 122 / 2, 74, 122);
+  const hammerR = pxRect(326, floorY(62), 104, 62);
+  const glassR = pxRect(462, wallMidY() - 164 / 2, 176, 164);
+  const sdR = pxRect(506, floorY(50), 92, 50);
+  const ventR = pxRect(700, wallMidY() - 132 / 2, 156, 132);
+  const noteBR = pxRect(654, floorY(50), 64, 50);
+  const keyR = pxRect(776, floorY(52), 84, 52);
+  const lockR = pxRect(layout.doorX - 68, layout.doorY + 118, 64, 112);
+
+  // -------- STEP 1: Note A on the floor (always visible) --------
   objects.push({
-    id: `${roomId}_step1_switch`,
-    name: "main_switch",
+    id: `${roomId}_step1_noteA`,
+    name: "noteA",
+    prompt: `${base.noteAPrompt}, ${OBJ_STYLE}`,
+    x: noteAR.x,
+    y: noteAR.y,
+    width: noteAR.width,
+    height: noteAR.height,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "clue_note",
+    gives: fClueA,
+    itemId: noteAId,
+    itemDisplayName: "Crumpled Note",
+    itemEmoji: "📝",
+    noteTitle: "Crumpled Note",
+    noteBody:
+      "Behind me the wall switch has been disarmed. Flip it to bring the lights back — everything else in this room is dark until then.",
+    description: "A crumpled piece of paper on the floor.",
+  });
+
+  // -------- STEP 2: Wall switch (requires clue A) --------
+  objects.push({
+    id: `${roomId}_step2_switch`,
+    name: "switch",
     prompt: `${base.switchPrompt}, ${OBJ_STYLE}`,
     x: switchR.x,
     y: switchR.y,
@@ -755,175 +752,168 @@ function buildChainedRoom(
     interactable: true,
     removeBackground: true,
     kind: "switch",
-    symbol: "1",
     initialOn: false,
     targetOn: true,
-    gives: flag(1),
-    description: "A wall switch. It looks like the master power.",
+    requires: fClueA,
+    gives: fPower,
+    description: "A heavy wall switch. Pulling it should restore power.",
   });
 
-  // ---- STEP 2: small ITEM on the floor (revealed by switch) ----
+  // -------- STEP 3: Hammer on the floor (hidden until power) --------
   objects.push({
-    id: `${roomId}_step2_item`,
-    name: "key_a",
-    prompt: `${base.itemPrompts[0] ?? "small thematic item"}, ${OBJ_STYLE}`,
-    x: item2R.x,
-    y: item2R.y,
-    width: item2R.width,
-    height: item2R.height,
+    id: `${roomId}_step3_hammer`,
+    name: "hammer",
+    prompt: `${base.hammerPrompt}, ${OBJ_STYLE}`,
+    x: hammerR.x,
+    y: hammerR.y,
+    width: hammerR.width,
+    height: hammerR.height,
     collidable: false,
     interactable: true,
     removeBackground: true,
-    kind: "item",
-    requires: flag(1),
-    gives: flag(2),
-    description: "A small object lying on the floor.",
+    kind: "tool_item",
+    hiddenUntilFlag: fPower,
+    gives: fHammerUp,
+    itemId: hammerId,
+    itemDisplayName: "Hammer",
+    itemEmoji: "🔨",
+    toolKind: "hammer",
+    description: "A sturdy hammer. Good for smashing glass.",
   });
 
-  // ---- STEP 3: CONTAINER on the floor (opens with the step-2 item) ----
+  // -------- STEP 4: Glass display case on the wall (needs hammer) --------
   objects.push({
-    id: `${roomId}_step3_container`,
-    name: "container",
-    prompt: `small thematic chest or storage box that fits inside the world, ${base.pedestalPrompt}, ${OBJ_STYLE}`,
-    x: chestR.x,
-    y: chestR.y,
-    width: chestR.width,
-    height: chestR.height,
-    collidable: true,
+    id: `${roomId}_step4_glasscase`,
+    name: "glass_case",
+    prompt: `${base.glassCasePrompt}, ${OBJ_STYLE}`,
+    x: glassR.x,
+    y: glassR.y,
+    width: glassR.width,
+    height: glassR.height,
+    collidable: false,
     interactable: true,
     removeBackground: true,
-    kind: "pedestal",
-    acceptsItems: [flag(2)],
-    requires: flag(2),
-    gives: flag(3),
-    description: "A small chest. It looks like it might fit something.",
+    kind: "breakable",
+    needsToolKind: "hammer",
+    gives: fGlass,
+    description: "A reinforced glass case. Something is sealed inside.",
   });
 
-  // ---- STEP 4: second ITEM (revealed when container opens) ----
-  if (stepCount >= 4) {
-    objects.push({
-      id: `${roomId}_step4_item`,
-      name: "key_b",
-      prompt: `${base.itemPrompts[1] ?? "small thematic item"}, ${OBJ_STYLE}`,
-      x: item4R.x,
-      y: item4R.y,
-      width: item4R.width,
-      height: item4R.height,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "item",
-      requires: flag(3),
-      gives: flag(4),
-      description: "A second small object.",
-    });
-  }
+  // -------- STEP 5: Screwdriver (hidden inside the case) --------
+  objects.push({
+    id: `${roomId}_step5_screwdriver`,
+    name: "screwdriver",
+    prompt: `${base.screwdriverPrompt}, ${OBJ_STYLE}`,
+    x: sdR.x,
+    y: sdR.y,
+    width: sdR.width,
+    height: sdR.height,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "tool_item",
+    hiddenUntilFlag: fGlass,
+    gives: fSd,
+    itemId: screwdriverId,
+    itemDisplayName: "Screwdriver",
+    itemEmoji: "🪛",
+    toolKind: "screwdriver",
+    description: "A screwdriver. Good for unscrewing grates.",
+  });
 
-  // ---- STEP 5: PEDESTAL/altar on the back wall, accepts the step-4 item ----
-  if (stepCount >= 5) {
-    objects.push({
-      id: `${roomId}_step5_pedestal`,
-      name: "pedestal",
-      prompt: `${base.pedestalPrompt}, ${OBJ_STYLE}`,
-      x: pedR.x,
-      y: pedR.y,
-      width: pedR.width,
-      height: pedR.height,
-      collidable: true,
-      interactable: true,
-      removeBackground: true,
-      kind: "pedestal",
-      acceptsItems: [flag(4)],
-      requires: flag(4),
-      gives: flag(5),
-      description: "A pedestal with an empty receptacle on top.",
-    });
-  }
+  // -------- STEP 6: Wall vent (needs screwdriver) --------
+  objects.push({
+    id: `${roomId}_step6_vent`,
+    name: "vent",
+    prompt: `${base.ventPrompt}, ${OBJ_STYLE}`,
+    x: ventR.x,
+    y: ventR.y,
+    width: ventR.width,
+    height: ventR.height,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "breakable",
+    needsToolKind: "screwdriver",
+    gives: fVent,
+    description: "An air vent bolted to the wall with four screws.",
+  });
 
-  // ---- STEP 6: small KEY/CODE — gives the door-unlock flag ----
-  if (stepCount >= 6) {
-    objects.push({
-      id: `${roomId}_step6_key`,
-      name: "door_key",
-      prompt: `${base.itemPrompts[2] ?? "small thematic key"}, ${OBJ_STYLE}`,
-      x: keyR.x,
-      y: keyR.y,
-      width: keyR.width,
-      height: keyR.height,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "item",
-      requires: flag(5),
-      gives: doorFlag,
-      description: "A key has appeared. It must fit the door.",
-    });
-  } else {
-    // 5-step chain: pedestal directly unlocks the door.
-    const ped = objects.find((o) => o.id === `${roomId}_step5_pedestal`);
-    if (ped) ped.gives = doorFlag;
-  }
+  // -------- STEP 7a: Note B with door code (hidden in vent) --------
+  objects.push({
+    id: `${roomId}_step7_noteB`,
+    name: "noteB",
+    prompt: `${base.noteBPrompt}, ${OBJ_STYLE}`,
+    x: noteBR.x,
+    y: noteBR.y,
+    width: noteBR.width,
+    height: noteBR.height,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "clue_note",
+    hiddenUntilFlag: fVent,
+    gives: fCode,
+    itemId: noteBId,
+    itemDisplayName: "Coded Note",
+    itemEmoji: "📜",
+    noteTitle: "Coded Note",
+    noteBody: isLast
+      ? `The final door accepts a four-letter word:\n\n    ${letterCode}\n\nThe brass key fits the lock. Insert it, then enter the word.`
+      : `Door keypad code:\n\n    ${code}\n\nThe brass key fits the lock. Insert it, then enter the code.`,
+    description: "A folded note hidden behind the vent.",
+  });
 
-  // ---- OPTIONAL STEP 7 (last room only): final SEQUENCE LOCK ----
-  if (stepCount >= 7) {
-    // Hijack: step 6 gives a "code revealed" intermediate flag instead of
-    // the door flag. The final 4-button sequence lock then gives the door.
-    const stepKey = objects.find((o) => o.id === `${roomId}_step6_key`);
-    if (stepKey) stepKey.gives = flag(6);
+  // -------- STEP 7b: Brass key (hidden in vent) --------
+  objects.push({
+    id: `${roomId}_step7_key`,
+    name: "key",
+    prompt: `${base.keyPrompt}, ${OBJ_STYLE}`,
+    x: keyR.x,
+    y: keyR.y,
+    width: keyR.width,
+    height: keyR.height,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: "tool_item",
+    hiddenUntilFlag: fVent,
+    gives: fKey,
+    itemId: keyId,
+    itemDisplayName: isLast ? "Rune Key" : "Brass Key",
+    itemEmoji: "🗝️",
+    toolKind: "key",
+    description: "A heavy key. It must fit the exit door.",
+  });
 
-    const seq = ["✦", "✧", "✪", "✺"];
-    const muralR = pxRect(196, layout.WALL_TOP + 18, 224, 132);
-    objects.push({
-      id: `${roomId}_step7_mural`,
-      name: "mural",
-      prompt: `${base.muralPrompt}, ${OBJ_STYLE}`,
-      x: muralR.x,
-      y: muralR.y,
-      width: muralR.width,
-      height: muralR.height,
-      collidable: false,
-      interactable: true,
-      removeBackground: true,
-      kind: "sequence_clue",
-      sequenceSymbols: seq,
-      requires: flag(6),
-      description: `A mural revealed by the previous step. ${seq.length} glyphs in a sequence.`,
-    });
-    const order = [...seq.keys()];
-    for (let s = order.length - 1; s > 0; s--) {
-      const j = randInt(rng, 0, s);
-      [order[s], order[j]] = [order[j]!, order[s]!];
-    }
-    const buttonY = Math.round(layout.FLOOR_BOT - 88);
-    const startX = 92;
-    const stepX = 128;
-    const btnSize = 80;
-    for (let k = 0; k < seq.length; k++) {
-      const symbolIdx = order[k]!;
-      const br = pxRect(startX + k * stepX, buttonY, btnSize, btnSize);
-      objects.push({
-        id: `${roomId}_step7_btn${k}`,
-        name: `btn${k}`,
-        prompt: `${base.buttonPrompt}, ${OBJ_STYLE}`,
-        x: br.x,
-        y: br.y,
-        width: br.width,
-        height: br.height,
-        collidable: false,
-        interactable: true,
-        removeBackground: true,
-        kind: "sequence_button",
-        symbol: seq[symbolIdx]!,
-        symbolIndex: symbolIdx,
-        requires: flag(6),
-        description: `A button engraved with ${seq[symbolIdx]}.`,
-      });
-    }
-    // The sequence-button engine path already calls unlockDoor() on
-    // sequence completion, so we don't need to set `gives` on each button.
-  }
+  // -------- STEP 8: Door lock (key + keypad / letter lock) --------
+  // We model the final puzzle as a single `keyed_lock` drawn on the
+  // door frame: clicking it with the key in the inventory opens a
+  // code modal, and a correct answer sets the door flag.
+  objects.push({
+    id: `${roomId}_step8_doorlock`,
+    name: "doorlock",
+    prompt: `small wall-mounted heavy ornate lock panel beside the door, ${OBJ_STYLE}`,
+    x: lockR.x,
+    y: lockR.y,
+    width: lockR.width,
+    height: lockR.height,
+    collidable: false,
+    interactable: true,
+    removeBackground: true,
+    kind: isLast ? "letter_lock" : "keypad",
+    codeAnswer: isLast ? letterCode : code,
+    codeLength: 4,
+    isLetters: isLast,
+    needsKeyItemId: keyId,
+    requires: fCode, // must know the code before the lock reveals itself
+    gives: doorFlag,
+    description: isLast
+      ? "An engraved four-letter dial lock beside the door."
+      : "A four-digit keypad beside the door.",
+  });
 
-  // ---- DOOR ----
+  // -------- DOOR (becomes interactive once door flag is set) --------
   objects.push(
     makeDoor(
       base,
@@ -931,17 +921,35 @@ function buildChainedRoom(
       isLast,
       layout,
       isLast
-        ? "The final exit door. Solve every step in this room to open it."
+        ? "The final exit door. Solve every puzzle in this room to open it."
         : "The door to the next room. Locked until the puzzle is finished.",
     ),
   );
 
-  // ---- WALL DECO (always non-interactable, just atmosphere) ----
+  // -------- WALL DECO (purely atmospheric) --------
   objects.push(makeWallDeco(base, i, layout));
 
-  return [
-    objects,
-    `${stepCount} steps lie between you and the next door. Click on objects to investigate them — each one unlocks the next.`,
-  ];
-}
+  const baseIntro = isFirst
+    ? `You wake up in the ${base.rooms[i]}. The door behind you is sealed.`
+    : isLast
+      ? `You enter the final room: the ${base.rooms[i]}. Freedom is close.`
+      : `You step into the ${base.rooms[i]}. The deeper you go, the stranger it gets.`;
 
+  const chainIntro = [
+    "Eight puzzles stand between you and the next door:",
+    "  • Read the notes",
+    "  • Power the room with the wall switch",
+    "  • Pick up the hammer and smash the glass case",
+    "  • Use the screwdriver to pry open the vent",
+    "  • Grab the key, read the code, unlock the door.",
+  ].join("\n");
+
+  return {
+    id: roomId,
+    name: base.rooms[i] ?? `Room ${i + 1}`,
+    background_prompt: base.bgs[i] ?? base.bgs[0]!,
+    ambient_color: base.ambient[i] ?? "#0a0a14",
+    objects,
+    intro: `${baseIntro}\n\n${chainIntro}`,
+  };
+}
