@@ -182,7 +182,14 @@ export interface GamePlan {
 // backgrounds line up with the chrome around the canvas.
 const W = 1280;
 const H = 720;
+/** Horizon line (px): above = back wall; below = floor plane (matches AI void bands). */
 const FLOOR_TOP = 410;
+/** Feet / heavy props rest on this baseline (inset from canvas bottom). */
+const FLOOR_BASELINE = H - 30;
+/** Wall-mounted slots must not visually cross into the floor band. */
+const WALL_OBJ_MAX_BOTTOM = FLOOR_TOP - 10;
+/** Floor pickups sit fully below the horizon so sprites never "hover". */
+const FLOOR_OBJ_MIN_TOP = FLOOR_TOP + 14;
 
 function mulberry32(seed: number): () => number {
   let t = seed >>> 0;
@@ -247,17 +254,18 @@ interface ThemeDef {
 
 /** One coherent look for the empty shell — must match cutout OBJECT_SCENE_SUFFIX. */
 const BG_STYLE =
-  "2D escape room game background, fixed orthographic camera straight-on, no perspective distortion, " +
-  "flat side-scroller layout: one continuous back wall plane and one flat floor plane meeting at a clean horizon, " +
-  "even soft ambient lighting from front-left, low contrast, no harsh shadows, no depth blur, " +
-  "hand-painted stylized game art (NOT photorealistic), same saturation as casual mobile puzzle games, " +
+  "2D escape room game background, fixed orthographic camera straight-on, no exaggerated wide-angle perspective, " +
+  "flat side-scroller layout: one continuous back wall plane and one flat floor plane meeting at one razor-sharp horizon line, " +
+  "natural soft key light from front-left, believable material read (wood grain, plaster, metal, painted steel), " +
+  "subtle atmospheric haze, grounded real-world interior proportions, " +
   "1280x720 composition, empty room with no props, no characters, no text, 16:9";
 
 /** Appended to every object cutout prompt so assets match the backdrop art style. */
 const OBJECT_SCENE_SUFFIX =
-  "2D game prop asset, same stylized hand-painted look as a flat escape-room background, " +
-  "orthographic side-view, no perspective warp, soft ambient light from front-left, no cast shadow, " +
-  "neutral saturation, readable silhouette, designed to sit on a flat floor or flat wall in a 1280x720 scene";
+  "physical prop as for a hidden-object game overlay, believable real-world materials and scale, " +
+  "orthographic side-view, no perspective warp, soft neutral light from front-left matching a room interior, " +
+  "no cast shadow, readable silhouette at small size, " +
+  `designed to sit flush on a flat floor at y≥${FLOOR_TOP} or flush on a flat wall with its bottom edge above y=${FLOOR_TOP - 10} in a 1280x720 scene`;
 
 const THEMES: ThemeDef[] = [
   {
@@ -486,7 +494,14 @@ function buildCustomTheme(theme: string): ThemeDef {
   };
 }
 
-export const PLAN_CANVAS = { width: W, height: H, floorTop: FLOOR_TOP };
+export const PLAN_CANVAS = {
+  width: W,
+  height: H,
+  floorTop: FLOOR_TOP,
+  floorBaseline: FLOOR_BASELINE,
+  /** Percent of scene height from top — sync with `.canvas-frame` wall/floor split. */
+  horizonPercent: (FLOOR_TOP / H) * 100,
+};
 
 /** Upstream image API rejects prompts longer than this. */
 const BG_PROMPT_MAX_LEN = 2000;
@@ -570,8 +585,8 @@ function composeBackgroundPrompt(room: RoomPlan, base: ThemeDef, i: number): str
     sceneBaseRaw.length > 420 ? `${sceneBaseRaw.slice(0, 417).trimEnd()}…` : sceneBaseRaw;
 
   const core =
-    `Empty ${W}x${H}px 2D game backdrop: wall y=0–${FLOOR_TOP - 1}, floor y=${FLOOR_TOP}–${H - 1}, ` +
-    `orthographic straight-on, no props, flat planes only. ` +
+    `Empty ${W}x${H}px 2D game backdrop: wall y=0–${FLOOR_TOP - 1}, floor y=${FLOOR_TOP}–${H - 1}, one perfectly straight horizontal horizon at y=${FLOOR_TOP} only, ` +
+    `orthographic straight-on, no props, flat planes only, no diagonal floor line. ` +
     `VOIDS (blank paint for PNG overlays): `;
 
   const forbid = " Forbidden: doors, locks, vents, cases, notes, tools, people, text, UI.";
@@ -647,12 +662,34 @@ interface RoomLayout {
   doorH: number;
 }
 
+function clampWallSlot(
+  layout: RoomLayout,
+  r: { x: number; y: number; width: number; height: number },
+): ReturnType<typeof pxRect> {
+  let { x, y, width, height } = r;
+  if (y + height > WALL_OBJ_MAX_BOTTOM) y = WALL_OBJ_MAX_BOTTOM - height;
+  if (y < layout.WALL_TOP) y = layout.WALL_TOP;
+  if (y + height > WALL_OBJ_MAX_BOTTOM) height = Math.max(48, WALL_OBJ_MAX_BOTTOM - y);
+  return pxRect(x, y, width, height);
+}
+
+function clampFloorSlot(
+  layout: RoomLayout,
+  r: { x: number; y: number; width: number; height: number },
+): ReturnType<typeof pxRect> {
+  let { x, y, width, height } = r;
+  y = Math.max(FLOOR_OBJ_MIN_TOP, Math.min(y, layout.FLOOR_BOT - height));
+  height = Math.min(height, layout.FLOOR_BOT - y);
+  return pxRect(x, y, width, Math.max(32, height));
+}
+
 function makeLayout(): RoomLayout {
   const WALL_TOP = 120;
   const WALL_BOT = FLOOR_TOP - 10;
-  const FLOOR_BOT = H - 30;
-  const doorW = 200;
-  const doorH = 440;
+  const FLOOR_BOT = FLOOR_BASELINE;
+  // ~0.9 m door width at this orthographic scale (~2.1:1 height:width like a real interior door).
+  const doorW = 196;
+  const doorH = 432;
   const doorX = Math.round(W - doorW - 60);
   const doorY = Math.round(FLOOR_BOT - doorH);
   return { WALL_TOP, WALL_BOT, FLOOR_BOT, doorX, doorY, doorW, doorH };
@@ -801,19 +838,79 @@ function buildStageSlots(
 
   const clampDoor = (x: number, w: number) => Math.min(x, doorCol - w - 8);
 
-  const noteAR = pxRect(clampDoor(lane(0), 64), floorY(52), 64, 52);
-  const switchR = pxRect(clampDoor(lane(0) + 8, 72), wallMid - 64, 72, 120);
-  const hammerR = pxRect(clampDoor(lane(1), 104), floorY(64), 104, 64);
-  const knifeR = pxRect(clampDoor(lane(1) - 24, 88), floorY(44), 88, 44);
-  const crowbarR = pxRect(clampDoor(lane(0) + 32, 96), floorY(48), 96, 48);
-  const glassR = pxRect(clampDoor(lane(2), 176), wallMid - 80, 176, 168);
-  const briefR = pxRect(clampDoor(lane(2) - 48, 144), floorY(76), 144, 72);
-  const crateR = pxRect(clampDoor(lane(2) - 24, 144), floorY(80), 144, 80);
-  const sdR = pxRect(clampDoor(lane(3) - 56, 96), floorY(52), 96, 52);
-  const ventR = pxRect(clampDoor(lane(3), 160), wallMid - 68, 160, 136);
-  const noteBR = pxRect(clampDoor(lane(3) - 8, 64), floorY(50), 64, 48);
-  const keyR = pxRect(clampDoor(lane(3) + 56, 88), floorY(52), 88, 52);
-  const lockR = pxRect(layout.doorX - 72 + jx, layout.doorY + 120 + jy, 64, 112);
+  const noteAR = clampFloorSlot(layout, {
+    x: clampDoor(lane(0), 76),
+    y: floorY(58),
+    width: 76,
+    height: 58,
+  });
+  const switchR = clampWallSlot(layout, {
+    x: clampDoor(lane(0) + 8, 76),
+    y: wallMid - 72,
+    width: 76,
+    height: 128,
+  });
+  const hammerR = clampFloorSlot(layout, {
+    x: clampDoor(lane(1), 118),
+    y: floorY(42),
+    width: 118,
+    height: 42,
+  });
+  const knifeR = clampFloorSlot(layout, {
+    x: clampDoor(lane(1) - 24, 78),
+    y: floorY(30),
+    width: 78,
+    height: 30,
+  });
+  const crowbarR = clampFloorSlot(layout, {
+    x: clampDoor(lane(0) + 32, 120),
+    y: floorY(34),
+    width: 120,
+    height: 34,
+  });
+  const glassR = clampWallSlot(layout, {
+    x: clampDoor(lane(2), 184),
+    y: wallMid - 86,
+    width: 184,
+    height: 142,
+  });
+  const briefR = clampFloorSlot(layout, {
+    x: clampDoor(lane(2) - 48, 140),
+    y: floorY(68),
+    width: 140,
+    height: 68,
+  });
+  const crateR = clampFloorSlot(layout, {
+    x: clampDoor(lane(2) - 24, 132),
+    y: floorY(76),
+    width: 132,
+    height: 76,
+  });
+  const sdR = clampFloorSlot(layout, {
+    x: clampDoor(lane(3) - 56, 92),
+    y: floorY(34),
+    width: 92,
+    height: 34,
+  });
+  const ventR = clampWallSlot(layout, {
+    x: clampDoor(lane(3), 156),
+    y: wallMid - 74,
+    width: 156,
+    height: 124,
+  });
+  const noteBR = clampFloorSlot(layout, {
+    x: clampDoor(lane(3) - 8, 70),
+    y: floorY(52),
+    width: 70,
+    height: 52,
+  });
+  const keyR = clampFloorSlot(layout, {
+    x: clampDoor(lane(3) + 56, 86),
+    y: floorY(44),
+    width: 86,
+    height: 44,
+  });
+  const lockR = pxRect(layout.doorX - 70 + jx, layout.doorY + 118 + jy, 68, 108);
   void mk;
   return {
     noteAR,

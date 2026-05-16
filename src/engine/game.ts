@@ -144,7 +144,7 @@ export class GameEngine {
     };
     this.secondsLeft = Math.max(60, plan.timeLimitSec ?? 420);
     this.charX = W / 2 - CHARACTER_W / 2;
-    this.charY = H - 30 - CHARACTER_H;
+    this.charY = PLAN_CANVAS.floorBaseline - CHARACTER_H;
     void getCharacterFrames();
     this.loadRoom(0);
   }

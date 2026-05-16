@@ -253,10 +253,10 @@ textarea:focus {
   min-height: 0;
 }
 .canvas-frame {
-  /* REM-style wall + floor split frame behind the canvas. The wall and
-   * floor colours come from the active room's ambient palette. */
+  /* REM-style wall + floor split behind the canvas. Horizon matches PLAN_CANVAS.floorTop. */
   --wall-color: #1a1a2c;
   --floor-color: #06060c;
+  --scene-horizon-pct: 56.94444444444444%;
   position: relative;
   border-radius: 16px;
   overflow: hidden;
@@ -272,13 +272,13 @@ textarea:focus {
 }
 .canvas-bg-wall {
   position: absolute;
-  inset: 0 0 38% 0;
+  inset: 0 0 calc(100% - var(--scene-horizon-pct)) 0;
   background-color: var(--wall-color);
   pointer-events: none;
 }
 .canvas-bg-floor {
   position: absolute;
-  inset: 62% 0 0 0;
+  inset: var(--scene-horizon-pct) 0 0 0;
   background-color: var(--floor-color);
   pointer-events: none;
 }

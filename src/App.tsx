@@ -387,6 +387,7 @@ export default function App() {
                 className="canvas-frame"
                 style={
                   {
+                    "--scene-horizon-pct": `${PLAN_CANVAS.horizonPercent}%`,
                     "--wall-color":
                       plan.rooms.find((r) => r.id === currentRoomId)?.ambient_color ?? "#0a0a14",
                     "--floor-color": darkenHex(
